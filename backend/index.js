@@ -32,6 +32,8 @@ io.on('connection', (socket) => {
 
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/projects', require('./routes/project'));
+app.use("/api", require("./routes/runCode")); 
+
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
