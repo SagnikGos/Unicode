@@ -4,7 +4,7 @@ import io from "socket.io-client";
 import MonacoEditor from "@monaco-editor/react";
 import axios from "axios";
 
-const socket = io("http://localhost:3001");
+const socket = io("https://unicode-37d2.onrender.com");
 
 export default function EditorPage() {
   const { projectId } = useParams();
@@ -18,7 +18,7 @@ export default function EditorPage() {
   useEffect(() => {
     socket.emit("joinProject", { projectId });
 
-    axios.get(`http://localhost:3001/api/projects/${projectId}`)
+    axios.get(`https://unicode-37d2.onrender.com/api/projects/${projectId}`)
       .then((res) => setCode(res.data.code))
       .catch(() => setCode("// Start coding here"));
 
@@ -68,7 +68,7 @@ export default function EditorPage() {
     setCode(newCode);
     socket.emit("codeChange", { projectId, code: newCode });
 
-    axios.post("http://localhost:3001/api/projects/update", { projectId, code: newCode })
+    axios.post("https://unicode-37d2.onrender.com/api/projects/update", { projectId, code: newCode })
       .catch((err) => console.log(err));
   };
 
