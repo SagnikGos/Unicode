@@ -9,7 +9,7 @@ export default function LoginPage() {
 
   const joinProject = async () => {
     try {
-      await axios.post("http://localhost:3001/api/projects/join", { projectId, password });
+      await axios.post("https://unicode-37d2.onrender.com/api/projects/join", { projectId, password });
       navigate(`/editor/${projectId}`);
     } catch (err) {
       alert("Invalid Project ID or Password");
@@ -20,14 +20,14 @@ export default function LoginPage() {
     <div className="flex flex-col items-center justify-center h-screen bg-gray-900 text-white">
       <h1 className="text-3xl mb-4">Join a Project</h1>
       <input
-        className="p-2 m-2 border rounded text-black"
+        className="p-2 m-2 border rounded text-white"
         placeholder="Project ID"
         value={projectId}
         onChange={(e) => setProjectId(e.target.value)}
       />
       <input
         type="password"
-        className="p-2 m-2 border rounded text-black"
+        className="p-2 m-2 border rounded text-white"
         placeholder="Password"
         value={password}
         onChange={(e) => setPassword(e.target.value)}

@@ -77,7 +77,7 @@ export default function EditorPage() {
     setOutput("Running code...");
     
     try {
-      const { data } = await axios.post("http://localhost:3001/api/run", { code, language });
+      const { data } = await axios.post("https://unicode-37d2.onrender.com/api/run", { code, language });
 
       if (data.stdout) {
         setOutputType("success");

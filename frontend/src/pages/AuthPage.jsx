@@ -14,7 +14,7 @@ export default function AuthPage() {
     const endpoint = isLogin ? "login" : "register";
 
     try {
-      const { data } = await axios.post(`http://localhost:3001/api/auth/${endpoint}`, {
+      const { data } = await axios.post(`https://unicode-37d2.onrender.com/api/auth/${endpoint}`, {
         username,
         password,
       });
@@ -36,14 +36,14 @@ export default function AuthPage() {
       <h1 className="text-3xl mb-4">{isLogin ? "Login" : "Signup"}</h1>
       {error && <p className="text-red-500">{error}</p>}
       <input
-        className="p-2 m-2 border rounded text-black"
+        className="p-2 m-2 border rounded text-white"
         placeholder="Username"
         value={username}
         onChange={(e) => setUsername(e.target.value)}
       />
       <input
         type="password"
-        className="p-2 m-2 border rounded text-black"
+        className="p-2 m-2 border rounded text-white"
         placeholder="Password"
         value={password}
         onChange={(e) => setPassword(e.target.value)}
