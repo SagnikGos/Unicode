@@ -164,7 +164,7 @@ export default function EditorPage() {
         setOutputType("success");
 
         try {
-            const { data } = await axios.post("https://unicode-37d2.onrender.com/api/run", { code: currentCode, language });
+            const { data } = await axios.post("https://unicode-production.up.railway.app/api/run", { code: currentCode, language });
 
             if (data.stderr || data.compile_output) {
                 setOutputType("error");

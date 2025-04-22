@@ -39,7 +39,7 @@ export default function LoginPage() {
         try {
             const body = { projectId, password };
             // 3. Send request with data AND config (including headers)
-            await axios.post("https://unicode-37d2.onrender.com/api/projects/join", body, config);
+            await axios.post("https://unicode-production.up.railway.app/api/projects/join", body, config);
 
             // If successful, navigate to the editor
             navigate(`/editor/${projectId}`);
