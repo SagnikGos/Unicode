@@ -1,27 +1,27 @@
-// --- File: index.js (Backend Main Server - With Debug Logging & Async Fix) ---
+// --- File: index.js (Backend Main Server - Truly Full Code with Temp Debug getYDoc) ---
 
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
-const { Server: SocketIOServer } = require('socket.io'); // Renamed to avoid conflict
+const { Server: SocketIOServer } = require('socket.io');
 const WebSocket = require('ws');
 const Y = require('yjs');
 const syncProtocol = require('y-protocols/sync');
 const awarenessProtocol = require('y-protocols/awareness');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
-const url = require('url'); // Needed for parsing URL in upgrade handler
+const url = require('url');
 const connectDB = require('./config/db'); // Adjust path if needed
 const Project = require('./models/project'); // Adjust path if needed
-// User model not directly used here but needed by Project schema refs
+// User model isn't directly used here but needed by Project model refs
 
 // --- Define and Register the YjsDoc Schema ---
 const YjsDocSchema = new mongoose.Schema({
     name: { type: String, required: true, index: true, unique: true }, // Should store Project ObjectId (_id) string
     data: { type: Buffer, required: true }, // Stores Yjs binary state/updates
 }, { timestamps: true });
-const YjsDocModel = mongoose.model('YjsDoc', YjsDocSchema);
+const YjsDocModel = mongoose.model('YjsDoc', YjsDocSchema); // Define and register the model
 console.log('[Persistence] Mongoose model for YjsDoc registered.');
 // --- END YjsDoc Schema Definition ---
 
@@ -31,26 +31,29 @@ const docs = new Map(); // In-memory cache: roomName (projectId) -> WSSharedDoc 
 const debouncedSave = new Map(); // Debounce timers: roomName (projectId) -> timer ID
 const debounceTimeout = 5000; // 5 seconds delay
 
-// Debounced save function
+// Debounced function to save Yjs document state to MongoDB
 const saveYDoc = async (doc) => {
-    const roomName = doc.name;
+    const roomName = doc.name; // roomName is the projectId (_id)
     if (debouncedSave.has(roomName)) {
-        clearTimeout(debouncedSave.get(roomName));
+        clearTimeout(debouncedSave.get(roomName)); // Clear existing timer if update occurs quickly
     }
+    // Set a new timer
     debouncedSave.set(roomName, setTimeout(async () => {
         console.log(`[Persistence ${roomName}] Debounced save triggered.`);
         try {
             const dataToSave = Y.encodeStateAsUpdate(doc); // Get current state as update
             console.log(`[Persistence ${roomName}] Saving doc state (size: ${dataToSave.length} bytes)`);
+            // Use the YjsDocModel variable defined above
             await YjsDocModel.findOneAndUpdate(
-                { name: roomName },
-                { data: Buffer.from(dataToSave) },
-                { upsert: true, new: true, setDefaultsOnInsert: true }
+                { name: roomName }, // Find by the Yjs room name (projectId)
+                { data: Buffer.from(dataToSave) }, // Set the new data
+                { upsert: true, new: true, setDefaultsOnInsert: true } // Options: create if missing, return new doc, set schema defaults
             );
             console.log(`[Persistence ${roomName}] Successfully saved doc state.`);
         } catch (error) {
             console.error(`[Persistence ${roomName}] Error saving document state:`, error);
         } finally {
+            // Remove the timer entry after execution (success or error)
             debouncedSave.delete(roomName);
         }
     }, debounceTimeout));
@@ -59,28 +62,27 @@ const saveYDoc = async (doc) => {
 // --- Yjs Document Class with WebSocket Handling ---
 class WSSharedDoc extends Y.Doc {
     constructor(name) { // name = projectId (_id string)
-        super({ gc: true });
+        super({ gc: true }); // Enable Yjs garbage collection
         this.name = name;
         this.awareness = new awarenessProtocol.Awareness(this);
-        this.awareness.setLocalState(null);
+        this.awareness.setLocalState(null); // Initialize server's awareness state (usually null)
         this.conns = new Map(); // ws -> Set<clientID>
         this.isLoaded = false; // Flag for initial data load state
-        // Start loading immediately and store the promise. Connections will await this.
-        this.loadPromise = this.loadPersistedData();
+        this.loadPromise = this.loadPersistedData(); // Start loading, store promise
 
         // Register event listeners
         this.on('update', (update, origin) => {
-            this._updateHandler(update, origin);
-            saveYDoc(this); // Trigger save on any update
+            this._updateHandler(update, origin); // Broadcast update to other clients
+            saveYDoc(this); // Trigger debounced save to DB
         });
         this.awareness.on('update', this._awarenessUpdateHandler.bind(this));
     }
 
+    // Load initial state from MongoDB
     async loadPersistedData() {
-        // Mark as loading started (though isLoaded remains false until done)
         console.log(`[Persistence ${this.name}] Checking DB for existing data...`);
         try {
-            const dbDoc = await YjsDocModel.findOne({ name: this.name }).lean();
+            const dbDoc = await YjsDocModel.findOne({ name: this.name }).lean(); // Use lean for performance
             if (dbDoc?.data) {
                 console.log(`[Persistence ${this.name}] Found data (size: ${dbDoc.data.length} bytes). Applying update...`);
                 try {
@@ -88,11 +90,8 @@ class WSSharedDoc extends Y.Doc {
                     Y.applyUpdate(this, dbDoc.data, 'persistence'); // Use origin to avoid echo/loop
                     console.log(`[Persistence ${this.name}] Successfully applied update. Doc state vector:`, Y.encodeStateVector(this));
                 } catch (applyError) {
-                    // Log error if applying update fails (might indicate corrupt data)
                     console.error(`[Persistence ${this.name}] !!! ERROR APPLYING PERSISTED UPDATE !!! :`, applyError);
-                    // Consider deleting the corrupt dbDoc here?
-                    // await YjsDocModel.deleteOne({ name: this.name });
-                    // console.warn(`[Persistence ${this.name}] Deleted potentially corrupted document data from DB.`);
+                    // Consider deleting corrupted data? Start fresh?
                 }
             } else {
                 console.log(`[Persistence ${this.name}] No data found in DB. Starting fresh.`);
@@ -100,13 +99,13 @@ class WSSharedDoc extends Y.Doc {
         } catch (err) {
             console.error(`[Persistence ${this.name}] Error during findOne in loadPersistedData:`, err);
         } finally {
-             // Mark loading as complete, regardless of success/failure, to unblock connections
-             this.isLoaded = true;
+             this.isLoaded = true; // Mark loading as complete
              console.log(`[Persistence ${this.name}] Load process finished (isLoaded=${this.isLoaded}).`);
         }
     }
 
-    _awarenessUpdateHandler({ added, updated, removed }, connOrigin) {
+    // Handle broadcasting Awareness updates
+     _awarenessUpdateHandler({ added, updated, removed }, connOrigin) {
          const changedClients = added.concat(updated).concat(removed);
          const connControlledIDs = connOrigin ? this.conns.get(connOrigin) : null;
          if (connOrigin && connControlledIDs) {
@@ -116,24 +115,26 @@ class WSSharedDoc extends Y.Doc {
          const encoder = awarenessProtocol.encodeAwarenessUpdate(this.awareness, changedClients);
          const buffer = Buffer.concat([Buffer.from([syncProtocol.messageAwareness]), encoder]);
          this.conns.forEach((controlledIDs, conn) => {
-             if (conn !== connOrigin) {
+             if (conn !== connOrigin) { // Don't echo back to sender
                  try { conn.send(buffer); }
                  catch (e) { console.error(`[Awareness ${this.name}] Error sending update:`, e); this.removeConnection(conn); }
              }
          });
      }
 
+    // Handle broadcasting Yjs document updates
      _updateHandler(update, origin) {
          const encoder = syncProtocol.writeUpdate(update);
          const buffer = Buffer.concat([Buffer.from([syncProtocol.messageSync]), encoder]);
          this.conns.forEach((controlledIDs, conn) => {
-             if (conn !== origin) {
+             if (conn !== origin) { // Don't echo back to sender
                  try { conn.send(buffer); }
                  catch (e) { console.error(`[Sync ${this.name}] Error sending update:`, e); this.removeConnection(conn); }
              }
          });
      }
 
+    // Add a new client connection
     // Make async to allow waiting for loadPromise
     async addConnection(conn, userId) {
         console.log(`[WSSharedDoc ${this.name}] Adding connection for user: ${userId}. Waiting for initial load...`);
@@ -142,12 +143,9 @@ class WSSharedDoc extends Y.Doc {
         await this.loadPromise;
         console.log(`[WSSharedDoc ${this.name}] Document load completed (isLoaded=${this.isLoaded}). Proceeding with addConnection.`);
 
-        // If loading failed catastrophically, this.isLoaded might still be true,
-        // but the document state could be bad. The checks below might catch it.
-
         this.conns.set(conn, new Set()); // Register the connection
 
-        // --- Added Logging & Error Handling around SyncStep1 ---
+        // Log state vector before attempting sync step 1
         console.log(`[WSSharedDoc ${this.name}] Preparing SyncStep1... Current doc clientID: ${this.clientID}`);
         let stateVector;
         try {
@@ -164,11 +162,10 @@ class WSSharedDoc extends Y.Doc {
         // --- Sync Protocol Step 1 ---
         let syncEncoder;
         try {
-            // This line previously caused the "Cannot read properties of undefined (reading 'length')" error
-             syncEncoder = syncProtocol.writeSyncStep1(this);
+             syncEncoder = syncProtocol.writeSyncStep1(this); // Where TypeError previously occurred
         } catch (syncStep1Error) {
              console.error(`[WSSharedDoc ${this.name}] !!! ERROR during writeSyncStep1 !!!:`, syncStep1Error);
-             console.error(`[WSSharedDoc ${this.name}] State Vector at time of error was:`, stateVector); // Log state from above
+             console.error(`[WSSharedDoc ${this.name}] State Vector at time of error was:`, stateVector);
              this.removeConnection(conn); return; // Cannot proceed
         }
 
@@ -199,6 +196,7 @@ class WSSharedDoc extends Y.Doc {
         console.log(`[WSSharedDoc ${this.name}] Connection fully added and initialized for user: ${userId}`);
     }
 
+    // Remove a client connection
     removeConnection(conn) {
         if (this.conns.has(conn)) {
             const controlledIds = this.conns.get(conn);
@@ -206,6 +204,7 @@ class WSSharedDoc extends Y.Doc {
             this.conns.delete(conn);
             if (controlledIds && controlledIds.size > 0) {
                  console.log(`[WSSharedDoc ${this.name}] Removing awareness states for clientIDs: ${Array.from(controlledIds).join(', ')}`);
+                // Notify other clients that these awareness states are gone
                 awarenessProtocol.removeAwarenessStates(this.awareness, Array.from(controlledIds), 'disconnect');
             }
              console.log(`[WSSharedDoc ${this.name}] Connection removed. Remaining connections: ${this.conns.size}`);
@@ -216,7 +215,7 @@ class WSSharedDoc extends Y.Doc {
         }
         try {
              if (conn && conn.readyState !== WebSocket.CLOSED && conn.readyState !== WebSocket.CLOSING) {
-                 conn.close();
+                 conn.close(1000, "Server removing connection"); // Send a normal close code
              }
         } catch(closeError) {
              console.warn(`[WSSharedDoc ${this.name}] Error attempting to close WebSocket during removeConnection:`, closeError.message);
@@ -225,18 +224,39 @@ class WSSharedDoc extends Y.Doc {
 }
 
 // --- Document Management ---
-// Function to get or create a WSSharedDoc instance for a given roomName (projectId)
+// --- !!! TEMPORARY DEBUGGING VERSION of getYDoc !!! ---
+// This version FORCES a new WSSharedDoc instance creation on every call
+// to test if instance reuse after abnormal connection close causes the TypeError.
 const getYDoc = (docname) => {
-    let doc = docs.get(docname);
-    if (doc === undefined) {
-        console.log(`[Yjs Doc Manager] Creating NEW doc instance in memory for room: ${docname}`);
-        doc = new WSSharedDoc(docname); // Constructor handles loading persisted data
-        docs.set(docname, doc);
-    } else {
-        console.log(`[Yjs Doc Manager] Reusing EXISTING doc instance from memory for room: ${docname}`);
+    console.warn(`[Yjs Doc Manager - DEBUG] FORCING NEW doc instance creation for room: ${docname}`);
+
+    // Optional: Clean up any potentially corrupted instance from the map first
+    const oldDoc = docs.get(docname);
+    if (oldDoc) {
+         console.warn(`[Yjs Doc Manager - DEBUG] Destroying old cached instance for room: ${docname}`);
+         // Disconnect any remaining connections cleanly before destroying
+         oldDoc.conns.forEach((controlledIds, conn) => {
+             try { conn.close(1012, 'Server refreshing instance'); } catch(e){} // Service Restart code
+         });
+         oldDoc.destroy(); // Call Yjs cleanup
+         docs.delete(docname); // Remove from map
+         clearTimeout(debouncedSave.get(docname)); // Clear save timer
+         debouncedSave.delete(docname);
     }
+
+    // Create the new instance (this will also trigger loadPersistedData)
+    const doc = new WSSharedDoc(docname);
+
+    // DO NOT put it back in the 'docs' map for this test,
+    // otherwise the *next* connection would reuse it again.
+    // docs.set(docname, doc); // <-- KEEP THIS COMMENTED OUT FOR THE TEST
+
+    console.warn(`[Yjs Doc Manager - DEBUG] Returning newly created instance for ${docname}. It is NOT cached.`);
     return doc;
 };
+// --- !!! END TEMPORARY DEBUGGING VERSION of getYDoc !!! ---
+// --- !!! REMEMBER TO REVERT THIS FUNCTION AFTER TESTING !!! ---
+
 
 // --- Server Setup ---
 const allowedOrigins = process.env.CORS_ALLOWED_ORIGINS ? process.env.CORS_ALLOWED_ORIGINS.split(',') : ['http://localhost:3000', "https://unicode-two.vercel.app"];
@@ -266,9 +286,10 @@ console.log('[WebSocket Server] Initialized (manual upgrade).');
 // --- Permission Checking Function (Matches latest ProjectSchema) ---
 async function checkUserPermission(userId, projectObjectId) {
     console.log(`[Permissions] Checking if user ${userId} can access project ${projectObjectId}`);
+    // Format validation happens in upgrade handler before this now
     if (!mongoose.Types.ObjectId.isValid(userId) || !mongoose.Types.ObjectId.isValid(projectObjectId)) {
         console.warn(`[Permissions] Invalid format passed to checkUserPermission: userId (${userId}), projectObjectId (${projectObjectId})`);
-        return false; // Should not happen if called from upgrade handler due to prior check
+        return false;
     }
     try {
         const project = await Project.findById(projectObjectId).select('users').lean(); // Find by _id, select only 'users'
@@ -303,7 +324,7 @@ server.on('upgrade', async (request, socket, head) => {
     try {
         const parsedUrl = url.parse(request.url, true);
         const token = parsedUrl.query.token;
-        projectObjectId = parsedUrl.query.projectId; // This should be the DB _id string
+        projectObjectId = parsedUrl.query.projectId; // Should be the DB _id string
 
         if (!token || !projectObjectId) {
             console.error(`[Upgrade] Failed: Missing token (${!token ? 'yes' : 'no'}) or projectObjectId (${!projectObjectId ? 'yes' : 'no'})`);
@@ -319,7 +340,7 @@ server.on('upgrade', async (request, socket, head) => {
              socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return;
         }
         userId = decoded.id; // Using 'id' field from payload
-        if (!userId || !mongoose.Types.ObjectId.isValid(userId)) { // Also check if userId is valid format
+        if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
             console.error(`[Upgrade] Failed: Invalid or missing user ID ('${userId}') from token payload.`);
             socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return;
         }
@@ -406,8 +427,18 @@ wss.on('connection', async (ws, req) => {
             const reasonStr = reason ? reason.toString() : 'No reason given';
             console.log(`[Yjs Connection ${roomName}] Connection closed for user: ${userId}. Code: ${code}, Reason: ${reasonStr}`);
             const doc = getYDoc(roomName); // Get instance again for cleanup
+            // If using DEBUG getYDoc, doc will be newly created, won't have this ws conn.
+            // If using original getYDoc, it might have the connection.
              if (doc instanceof WSSharedDoc) {
-                doc.removeConnection(ws);
+                 // Check if this specific connection is still tracked by this instance
+                 if (doc.conns.has(ws)) {
+                    doc.removeConnection(ws);
+                 } else {
+                    console.warn(`[Yjs Connection ${roomName}] Close event for a connection not tracked by current doc instance (maybe due to debug getYDoc or race condition).`);
+                 }
+             } else {
+                 // This case should ideally not happen if getYDoc always returns a WSSharedDoc
+                 console.error(`[Yjs Connection ${roomName}] Could not get valid doc instance on close for user: ${userId}`);
              }
         };
         ws.on('close', closeListener);
@@ -416,7 +447,9 @@ wss.on('connection', async (ws, req) => {
             console.error(`[Yjs Connection ${roomName}] WebSocket error for user ${userId}:`, error);
             const doc = getYDoc(roomName);
              if (doc instanceof WSSharedDoc) {
-                 doc.removeConnection(ws); // Ensure cleanup on error
+                 if (doc.conns.has(ws)) {
+                    doc.removeConnection(ws); // Ensure cleanup on error
+                 }
              }
         };
         ws.on('error', errorListener);
@@ -433,7 +466,7 @@ wss.on('connection', async (ws, req) => {
 });
 
 
-// --- Socket.IO Server (Optional) ---
+// --- Socket.IO Server (Optional, only if needed for other features) ---
 const io = new SocketIOServer(server, { cors: corsOptions });
 io.on('connection', (socket) => {
     // console.log('[Socket.IO] User connected (separate from Yjs):', socket.id);
