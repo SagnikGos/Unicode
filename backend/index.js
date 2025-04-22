@@ -1,4 +1,4 @@
-// --- File: index.js (Backend Main Server - Final Corrected Version with Logging) ---
+// --- File: index.js (Backend Main Server - Includes Minimal Reproduction Test) ---
 
 require('dotenv').config();
 const express = require('express');
@@ -124,50 +124,56 @@ class WSSharedDoc extends Y.Doc {
          });
      }
 
+    // Add Connection with Minimal Reproduction Test Included
     async addConnection(conn, userId) {
         console.log(`[WSSharedDoc ${this.name}] Adding connection for user: ${userId}. Waiting for initial load...`);
         await this.loadPromise; // Wait for loadPersistedData to finish
         console.log(`[WSSharedDoc ${this.name}] Document load completed (isLoaded=${this.isLoaded}). Proceeding with addConnection.`);
 
-        this.conns.set(conn, new Set());
+        this.conns.set(conn, new Set()); // Register the connection
 
         console.log(`[WSSharedDoc ${this.name}] Preparing SyncStep1... Current doc clientID: ${this.clientID}`);
         let stateVector;
         try {
-             stateVector = Y.encodeStateVector(this);
+             stateVector = Y.encodeStateVector(this); // Get current state summary
              console.log(`[WSSharedDoc ${this.name}] Current doc state vector (before sync):`, stateVector);
-             if (!(stateVector instanceof Uint8Array)) {
+             if (!(stateVector instanceof Uint8Array)) { // Sanity check
                  console.error(`[WSSharedDoc ${this.name}] !!! Invalid state vector type:`, typeof stateVector);
              }
         } catch (svError) {
              console.error(`[WSSharedDoc ${this.name}] !!! ERROR encoding state vector !!!:`, svError);
-             this.removeConnection(conn); return;
+             this.removeConnection(conn); return; // Cannot proceed if state is broken
         }
 
-        // --- Minimal Reproduction Test (Optional - keep commented out unless needed) ---
-        /*
+        // --- START: Minimal Reproduction Test ---
+        // Test if writeSyncStep1 works on a completely bare Y.Doc instance
         try {
-            const testDoc = new Y.Doc();
+            const testDoc = new Y.Doc(); // Create a brand new, empty Y.Doc
             console.log('[DEBUG] Testing writeSyncStep1 on brand new Y.Doc...');
             const testEncoder = syncProtocol.writeSyncStep1(testDoc);
+            // If this line is reached, the basic operation works
             console.log('[DEBUG] writeSyncStep1 on new Y.Doc SUCCEEDED. Encoder length:', testEncoder?.length);
-            testDoc.destroy(); // Clean up test doc
+            testDoc.destroy(); // Clean up the test document
         } catch (testError) {
+            // If this block is reached, writeSyncStep1 fails even on a fresh Y.Doc
             console.error('[DEBUG] !!! writeSyncStep1 on new Y.Doc FAILED !!!:', testError);
+            // This strongly suggests a library bug or environment incompatibility
         }
-        */
-        // --- End Minimal Test ---
+        // --- END: Minimal Reproduction Test ---
 
 
+        // --- Now attempt the real Sync Protocol Step 1 ---
         let syncEncoder;
         try {
-             syncEncoder = syncProtocol.writeSyncStep1(this); // Where error might occur
+             // This is the call that was causing the TypeError
+             syncEncoder = syncProtocol.writeSyncStep1(this);
         } catch (syncStep1Error) {
-             console.error(`[WSSharedDoc ${this.name}] !!! ERROR during writeSyncStep1 !!!:`, syncStep1Error);
-             console.error(`[WSSharedDoc ${this.name}] State Vector at time of error was:`, stateVector);
-             this.removeConnection(conn); return;
+             console.error(`[WSSharedDoc ${this.name}] !!! ERROR during writeSyncStep1 on 'this' instance !!!:`, syncStep1Error);
+             console.error(`[WSSharedDoc ${this.name}] State Vector at time of error was:`, stateVector); // Log state from above
+             this.removeConnection(conn); return; // Cannot proceed
         }
 
+        // --- Continue with sending SyncStep1 and Awareness ---
         const syncBuffer = Buffer.concat([Buffer.from([syncProtocol.messageSync]), syncEncoder]);
         try {
             console.log(`[WSSharedDoc ${this.name}] Sending SyncStep1 (size: ${syncBuffer.length} bytes)...`);
@@ -175,10 +181,9 @@ class WSSharedDoc extends Y.Doc {
             console.log(`[WSSharedDoc ${this.name}] SyncStep1 sent.`);
         } catch (sendError) {
             console.error(`[WSSharedDoc ${this.name}] Error sending SyncStep1:`, sendError);
-            this.removeConnection(conn); return;
+            this.removeConnection(conn); return; // Disconnect if send fails
         }
 
-        // --- Awareness Protocol ---
         const awarenessStates = this.awareness.getStates();
         if (awarenessStates.size > 0) {
              console.log(`[WSSharedDoc ${this.name}] Preparing initial Awareness state (states: ${awarenessStates.size})...`);
@@ -195,6 +200,7 @@ class WSSharedDoc extends Y.Doc {
         console.log(`[WSSharedDoc ${this.name}] Connection fully added and initialized for user: ${userId}`);
     }
 
+    // Remove a client connection
     removeConnection(conn) {
         if (this.conns.has(conn)) {
             const controlledIds = this.conns.get(conn);
@@ -219,20 +225,19 @@ class WSSharedDoc extends Y.Doc {
     }
 }
 
-// --- Document Management ---
-// --- Restored Original Caching Logic for getYDoc ---
+// --- Document Management --- (Using Original Caching Logic)
 const getYDoc = (docname) => {
     let doc = docs.get(docname);
     if (doc === undefined) {
         console.log(`[Yjs Doc Manager] Creating NEW doc instance in memory for room: ${docname}`);
-        doc = new WSSharedDoc(docname); // Constructor handles loading persisted data
+        doc = new WSSharedDoc(docname);
         docs.set(docname, doc);
     } else {
         console.log(`[Yjs Doc Manager] Reusing EXISTING doc instance from memory for room: ${docname}`);
     }
     return doc;
 };
-// --- END Restored Original getYDoc ---
+// --- END Original getYDoc ---
 
 
 // --- Server Setup ---
@@ -350,6 +355,7 @@ server.on('upgrade', async (request, socket, head) => {
 });
 
 // --- WebSocket Connection Handling ---
+// Make the handler async to await addConnection potentially waiting on loadPromise
 wss.on('connection', async (ws, req) => {
     const roomName = ws.roomId; // This is the projectObjectId string
     const userId = ws.userId;
@@ -377,9 +383,11 @@ wss.on('connection', async (ws, req) => {
                  const messageType = message[0];
                  switch (messageType) {
                      case syncProtocol.messageSync:
+                         // console.log(`[Yjs Message ${roomName}] Received Sync message`);
                          syncProtocol.readSyncMessage(message.slice(1), Y.encodeStateVector(ydoc), ydoc, ws);
                          break;
                      case syncProtocol.messageAwareness:
+                          // console.log(`[Yjs Message ${roomName}] Received Awareness message`);
                          awarenessProtocol.applyAwarenessUpdate(ydoc.awareness, message.slice(1), ws);
                          break;
                      default:
@@ -401,7 +409,6 @@ wss.on('connection', async (ws, req) => {
                  if (doc.conns.has(ws)) {
                     doc.removeConnection(ws);
                  } else {
-                     // This might happen if connection closes rapidly after creation or during complex scenarios
                     console.warn(`[Yjs Connection ${roomName}] Close event for a connection not tracked by current doc instance.`);
                  }
              } else {
@@ -442,7 +449,6 @@ io.on('connection', (socket) => {
 
 // --- Express Routes ---
 app.get('/', (req, res) => { res.send('Collaboration Server is running.'); });
-// Ensure these paths correctly point to your route files
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/projects', require('./routes/project'));
 app.use("/api", require("./routes/runCode"));
