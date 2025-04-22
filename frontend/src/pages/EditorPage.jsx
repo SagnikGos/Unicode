@@ -33,7 +33,7 @@ export default function EditorPage() {
 
         // --- Authentication Token Handling ---
         // !!! Replace 'authToken' with the actual key you use in localStorage !!!
-        const jwtToken = localStorage.getItem('authToken');
+        const jwtToken = localStorage.getItem('token');
 
         if (!jwtToken) {
             console.error("!!! Authentication token not found in localStorage ('authToken'). WebSocket connection will likely fail or be rejected. !!!");
