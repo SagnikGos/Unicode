@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useParams } from "react-router-dom";
-import MonacoEditor from "@monaco-editor/react"; // Import Monaco type
+import MonacoEditor from "@monaco-editor/react"; // Default import
 import axios from "axios";
 
 // --- Yjs Imports ---
@@ -31,23 +31,41 @@ export default function EditorPage() {
         console.log("[Yjs Client] Editor mounted.");
         editorRef.current = editor; // Store editor instance
 
+        // --- Authentication Token Handling ---
+        // !!! Replace 'authToken' with the actual key you use in localStorage !!!
+        const jwtToken = localStorage.getItem('authToken');
+
+        if (!jwtToken) {
+            console.error("!!! Authentication token not found in localStorage ('authToken'). WebSocket connection will likely fail or be rejected. !!!");
+            // Consider redirecting to login or showing an error message
+        } else {
+             console.log("[Yjs Client] Found auth token. Will attempt connection.");
+        }
+        // --- End Authentication Token Handling ---
+
         // --- Initialize Yjs ---
         const doc = new Y.Doc(); // Create Yjs doc
         ydocRef.current = doc; // Store ref to doc
 
+        // --- Pass token in WebsocketProvider options ---
         const provider = new WebsocketProvider(
-            // Ensure the URL is correct for your deployed backend
-            // Use wss:// for secure connections (recommended for deployment)
             'wss://unicode-37d2.onrender.com', // Your backend WebSocket endpoint URL
             projectId,                         // Room name (using projectId)
-            doc                                // Yjs document
+            doc,                               // Yjs document
+            {
+                // Pass connection parameters, including the token
+                params: {
+                    token: jwtToken || '' // Send the retrieved token (or empty string if none)
+                },
+                 connect: !!jwtToken // Only attempt connection if a token exists
+            }
         );
         providerRef.current = provider; // Store ref to provider
+        // --- End Yjs Initialization ---
 
         const yText = doc.getText('monaco'); // Get a shared text type named 'monaco'
 
         // --- Bind Monaco Editor to Yjs ---
-        // Ensure the binding uses the current model and editor context
         const model = editor.getModel();
         if (model) {
             const binding = new MonacoBinding(
@@ -67,26 +85,6 @@ export default function EditorPage() {
             console.log(`[Yjs Provider] Status: ${event.status}`);
         });
 
-        // Optional: Handle initial content loading if needed
-        // If the document is new/empty, you might fetch initial content
-        // provider.on('sync', isSynced => {
-        //    if (isSynced && yText.length === 0) {
-        //        console.log("Document synced and empty, fetching initial content...");
-        //        axios.get(`https://unicode-37d2.onrender.com/api/projects/${projectId}`)
-        //           .then(res => {
-        //               if (res.data.code) {
-        //                  // Apply initial content transactionally
-        //                  doc.transact(() => {
-        //                       yText.insert(0, res.data.code);
-        //                   });
-        //                   console.log("Applied fetched initial content to Yjs doc.");
-        //               }
-        //           })
-        //           .catch(err => console.error("Error fetching initial content for Yjs:", err));
-        //     }
-        // });
-
-
     }, [projectId]); // Re-run setup if projectId changes
 
     // Effect for cleanup and non-Yjs setup (like resize)
@@ -97,17 +95,19 @@ export default function EditorPage() {
 
         function startResize(e) {
              startY = e.clientY;
-             startHeight = parseInt(document.defaultView.getComputedStyle(resizeableOutput).height, 10);
-             document.documentElement.addEventListener('mousemove', resize);
-             document.documentElement.addEventListener('mouseup', stopResize);
-             e.preventDefault();
+             // Ensure resizeableOutput exists before accessing style
+             if (resizeableOutput) {
+                startHeight = parseInt(document.defaultView.getComputedStyle(resizeableOutput).height, 10);
+                document.documentElement.addEventListener('mousemove', resize);
+                document.documentElement.addEventListener('mouseup', stopResize);
+                e.preventDefault();
+             }
          }
 
         function resize(e) {
              const newHeight = startHeight - (e.clientY - startY);
-             // Ensure reasonable min/max heights
              const minHeight = 50;
-             const maxHeight = window.innerHeight * 0.6; // Max 60% of viewport height
+             const maxHeight = window.innerHeight * 0.6;
              if (newHeight > minHeight && newHeight < maxHeight && resizeableOutput) {
                  resizeableOutput.style.height = `${newHeight}px`;
              }
@@ -120,25 +120,23 @@ export default function EditorPage() {
 
         const resizeHandle = document.getElementById('resize-handle');
         if (resizeHandle) {
-             // Prevent adding multiple listeners if effect re-runs
              currentListener = resizeHandle.__resizeListener;
              if (currentListener) {
                  resizeHandle.removeEventListener('mousedown', currentListener);
              }
              resizeHandle.addEventListener('mousedown', startResize);
-             resizeHandle.__resizeListener = startResize; // Store listener reference
+             resizeHandle.__resizeListener = startResize;
          }
         // --- End Resizable Output Panel Logic ---
 
         // Cleanup function
         return () => {
             console.log("[Yjs Client] Cleanup: Destroying Yjs binding, provider, and doc.");
-            // Destroy Yjs artifacts in reverse order of creation
             bindingRef.current?.destroy();
-            providerRef.current?.disconnect(); // Disconnect provider
-            providerRef.current?.destroy(); // Destroy provider
-            ydocRef.current?.destroy(); // Destroy Yjs doc
-            editorRef.current = null; // Clear editor ref
+            providerRef.current?.disconnect();
+            providerRef.current?.destroy();
+            ydocRef.current?.destroy();
+            editorRef.current = null;
 
             // Cleanup resize listeners
             if (resizeHandle && resizeHandle.__resizeListener) {
@@ -148,7 +146,7 @@ export default function EditorPage() {
             document.documentElement.removeEventListener('mousemove', resize);
             document.documentElement.removeEventListener('mouseup', stopResize);
         };
-    }, []); // Empty dependency array means this effect runs once on mount for cleanup and resize setup
+    }, []); // Empty dependency array for mount/unmount behavior
 
 
     // --- Run Code Logic ---
@@ -159,12 +157,11 @@ export default function EditorPage() {
             setOutputType("error");
             return;
         }
-        // Get the current code content directly from the Yjs shared text type
         const currentCode = ydocRef.current.getText('monaco').toString();
 
         setIsRunning(true);
         setOutput("Running code...");
-        setOutputType("success"); // Reset output type
+        setOutputType("success");
 
         try {
             const { data } = await axios.post("https://unicode-37d2.onrender.com/api/run", { code: currentCode, language });
@@ -218,6 +215,14 @@ export default function EditorPage() {
     };
     // --- End Output Panel Styling Helpers ---
 
+    // Log button state for debugging
+    console.log('>>> Button State Check:', {
+        isRunning,
+        providerExists: !!providerRef.current,
+        providerConnected: providerRef.current?.wsconnected,
+        isButtonDisabled: isRunning || !providerRef.current || providerRef.current?.wsconnected === false
+    });
+
     return (
         <div className="h-screen flex flex-col bg-gray-900 text-gray-100">
             {/* Header */}
@@ -232,9 +237,6 @@ export default function EditorPage() {
                 <div className="flex items-center space-x-2">
                     <select
                         value={language}
-                        // When language changes, Monaco needs to know
-                        // The binding should handle language changes if configured,
-                        // otherwise, you might need to update the model language manually.
                         onChange={(e) => setLanguage(e.target.value)}
                         className="p-2 bg-gray-700 text-gray-200 rounded border-none outline-none focus:ring-1 focus:ring-blue-500"
                         style={{ WebkitAppearance: "menulist" }}
@@ -243,20 +245,16 @@ export default function EditorPage() {
                         <option value="python">Python</option>
                         <option value="c">C</option>
                         <option value="cpp">C++</option>
-                        {/* Add other languages as needed */}
                     </select>
 
                     <button
                         onClick={runCode}
-                        disabled={isRunning || !providerRef.current || providerRef.current.wsconnected === false} // Disable if not connected
-                        className={`px-4 py-2 rounded-md flex items-center space-x-2 transition-colors
-                          ${isRunning || !providerRef.current || providerRef.current.wsconnected === false
-                                ? 'bg-gray-600 cursor-not-allowed opacity-70'
-                                : 'bg-blue-600 hover:bg-blue-500'}`}
-                        title={!providerRef.current || providerRef.current.wsconnected === false ? "Connecting to collaboration server..." : "Run Code"}
+                        disabled={isRunning || !providerRef.current || providerRef.current?.wsconnected === false}
+                        className={`px-4 py-2 rounded-md flex items-center space-x-2 transition-colors ${isRunning || !providerRef.current || providerRef.current?.wsconnected === false ? 'bg-gray-600 cursor-not-allowed opacity-70' : 'bg-blue-600 hover:bg-blue-500'}`}
+                        title={!providerRef.current || providerRef.current?.wsconnected === false ? "Connecting to collaboration server..." : "Run Code"}
                     >
                         {isRunning ? (
-                            <>
+                            <> {/* Running Indicator */}
                                 <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
@@ -264,7 +262,7 @@ export default function EditorPage() {
                                 <span>Running...</span>
                             </>
                         ) : (
-                            <>
+                            <> {/* Run Icon */}
                                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                                     <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
                                 </svg>
@@ -279,20 +277,16 @@ export default function EditorPage() {
             <div className="flex-1 overflow-hidden">
                 <MonacoEditor
                     height="100%"
-                    language={language} // Pass language state
+                    language={language}
                     theme="vs-dark"
-                    // value prop is removed - content controlled by Yjs binding
-                    // onChange prop is removed - changes handled by Yjs binding
                     onMount={handleEditorDidMount} // Setup Yjs binding here
                     options={{
                         minimap: { enabled: true },
                         scrollBeyondLastLine: false,
                         fontSize: 14,
-                        fontFamily: "'Fira Code', monospace",
-                        automaticLayout: true, // Important for layout adjustments
+                        fontFamily: "'Fira Code', monospace", // Ensure font is loaded
+                        automaticLayout: true,
                     }}
-                    // You might need loading states while editor/binding initializes
-                    // loading={<div>Loading Editor...</div>}
                 />
             </div>
 
