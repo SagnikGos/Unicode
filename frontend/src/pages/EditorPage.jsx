@@ -16,6 +16,7 @@ export default function EditorPage() {
     const [output, setOutput] = useState("");
     const [isRunning, setIsRunning] = useState(false);
     const [outputType, setOutputType] = useState("success"); // success, error, warning
+    const [isConnected, setIsConnected] = useState(false); // Track connection status
 
     // Refs for editor instance and Yjs artifacts
     const editorRef = useRef(null); // Stores the Monaco editor instance
@@ -32,60 +33,82 @@ export default function EditorPage() {
         editorRef.current = editor; // Store editor instance
 
         // --- Authentication Token Handling ---
-        // !!! Replace 'authToken' with the actual key you use in localStorage !!!
+        // !!! Ensure 'token' is the correct key you use in localStorage !!!
         const jwtToken = localStorage.getItem('token');
 
         if (!jwtToken) {
-            console.error("!!! Authentication token not found in localStorage ('authToken'). WebSocket connection will likely fail or be rejected. !!!");
+            console.error("!!! Authentication token not found in localStorage ('token'). WebSocket connection will likely fail or be rejected. !!!");
             // Consider redirecting to login or showing an error message
+            // Optionally, set an error state here to inform the user
+        } else if (!projectId) {
+            console.error("!!! Project ID is missing from URL parameters. Cannot establish WebSocket connection. !!!");
+            // Handle missing projectId appropriately, maybe show an error message
         } else {
-             console.log("[Yjs Client] Found auth token. Will attempt connection.");
+             console.log("[Yjs Client] Found auth token and projectId. Will attempt connection.");
         }
         // --- End Authentication Token Handling ---
 
-        // --- Initialize Yjs ---
-        const doc = new Y.Doc(); // Create Yjs doc
-        ydocRef.current = doc; // Store ref to doc
+        // Only proceed with Yjs setup if we have the necessary identifiers
+        if (projectId && jwtToken) {
+            // --- Initialize Yjs ---
+            const doc = new Y.Doc(); // Create Yjs doc
+            ydocRef.current = doc; // Store ref to doc
 
-        // --- Pass token in WebsocketProvider options ---
-        const provider = new WebsocketProvider(
-            'wss://unicode-production.up.railway.app', // Your backend WebSocket endpoint URL
-            projectId,                         // Room name (using projectId)
-            doc,                               // Yjs document
-            {
-                // Pass connection parameters, including the token
-                params: {
-                    token: jwtToken || '' // Send the retrieved token (or empty string if none)
-                },
-                 connect: !!jwtToken // Only attempt connection if a token exists
-            }
-        );
-        providerRef.current = provider; // Store ref to provider
-        // --- End Yjs Initialization ---
-
-        const yText = doc.getText('monaco'); // Get a shared text type named 'monaco'
-
-        // --- Bind Monaco Editor to Yjs ---
-        const model = editor.getModel();
-        if (model) {
-            const binding = new MonacoBinding(
-                yText,                     // The Yjs text type
-                model,                     // Monaco editor model
-                new Set([editor]),         // Set of editor instances to bind
-                provider.awareness         // Yjs awareness for cursor/selection sync
+            // --- Create WebsocketProvider with BOTH token and projectId in params ---
+            const provider = new WebsocketProvider(
+                'wss://unicode-production.up.railway.app', // Your backend WebSocket endpoint URL
+                projectId,                                // Room name (still required by y-websocket for internal use)
+                doc,                                      // Yjs document
+                {
+                    // Pass connection parameters, BOTH token and projectId
+                    params: {
+                        token: jwtToken || '',            // Send the retrieved token (fallback to empty string)
+                        projectId: projectId              // <<< ADDED projectId HERE
+                    },
+                    // Only *attempt* connection if BOTH token and projectId exist (redundant with outer check but safe)
+                     connect: true // We already checked for jwtToken and projectId وجودهما
+                }
             );
-            bindingRef.current = binding; // Store ref to binding
-             console.log("[Yjs Client] Yjs Document, Provider, and MonacoBinding initialized.");
+            providerRef.current = provider; // Store ref to provider
+            // --- End Yjs Initialization ---
+
+            const yText = doc.getText('monaco'); // Get a shared text type named 'monaco'
+
+            // --- Bind Monaco Editor to Yjs ---
+            const model = editor.getModel();
+            if (model) {
+                // Avoid creating multiple bindings if editor re-mounts unexpectedly
+                if (bindingRef.current) {
+                    bindingRef.current.destroy();
+                }
+                const binding = new MonacoBinding(
+                    yText,                      // The Yjs text type
+                    model,                      // Monaco editor model
+                    new Set([editor]),          // Set of editor instances to bind
+                    provider.awareness          // Yjs awareness for cursor/selection sync
+                );
+                bindingRef.current = binding; // Store ref to binding
+                 console.log("[Yjs Client] Yjs Document, Provider, and MonacoBinding initialized.");
+            } else {
+                 console.error("[Yjs Client] Monaco Editor model not available for binding.");
+            }
+
+            // Log connection status changes and update state
+            provider.on('status', event => {
+                 console.log(`[Yjs Provider] Status: ${event.status}`);
+                 setIsConnected(event.status === 'connected'); // Update React state based on status
+            });
+
+            // Initial state check (sometimes status event fires before listener attaches)
+            setIsConnected(provider.wsconnected);
+
         } else {
-            console.error("[Yjs Client] Monaco Editor model not available for binding.");
+            console.warn("[Yjs Client] Skipping Yjs/WebSocket setup due to missing token or projectId.");
+            // You might want to display a message in the UI indicating connection failure
+            setIsConnected(false);
         }
 
-        // Log connection status changes
-        provider.on('status', event => {
-            console.log(`[Yjs Provider] Status: ${event.status}`);
-        });
-
-    }, [projectId]); // Re-run setup if projectId changes
+    }, [projectId]); // Re-run setup ONLY if projectId changes
 
     // Effect for cleanup and non-Yjs setup (like resize)
     useEffect(() => {
@@ -97,10 +120,10 @@ export default function EditorPage() {
              startY = e.clientY;
              // Ensure resizeableOutput exists before accessing style
              if (resizeableOutput) {
-                startHeight = parseInt(document.defaultView.getComputedStyle(resizeableOutput).height, 10);
-                document.documentElement.addEventListener('mousemove', resize);
-                document.documentElement.addEventListener('mouseup', stopResize);
-                e.preventDefault();
+                 startHeight = parseInt(document.defaultView.getComputedStyle(resizeableOutput).height, 10);
+                 document.documentElement.addEventListener('mousemove', resize);
+                 document.documentElement.addEventListener('mouseup', stopResize);
+                 e.preventDefault();
              }
          }
 
@@ -109,7 +132,7 @@ export default function EditorPage() {
              const minHeight = 50;
              const maxHeight = window.innerHeight * 0.6;
              if (newHeight > minHeight && newHeight < maxHeight && resizeableOutput) {
-                 resizeableOutput.style.height = `${newHeight}px`;
+                  resizeableOutput.style.height = `${newHeight}px`;
              }
          }
 
@@ -120,31 +143,36 @@ export default function EditorPage() {
 
         const resizeHandle = document.getElementById('resize-handle');
         if (resizeHandle) {
-             currentListener = resizeHandle.__resizeListener;
-             if (currentListener) {
-                 resizeHandle.removeEventListener('mousedown', currentListener);
-             }
-             resizeHandle.addEventListener('mousedown', startResize);
-             resizeHandle.__resizeListener = startResize;
+              currentListener = resizeHandle.__resizeListener;
+              if (currentListener) {
+                   resizeHandle.removeEventListener('mousedown', currentListener);
+              }
+              resizeHandle.addEventListener('mousedown', startResize);
+              resizeHandle.__resizeListener = startResize; // Store listener ref on element to prevent duplicates
          }
         // --- End Resizable Output Panel Logic ---
 
         // Cleanup function
         return () => {
-            console.log("[Yjs Client] Cleanup: Destroying Yjs binding, provider, and doc.");
-            bindingRef.current?.destroy();
-            providerRef.current?.disconnect();
-            providerRef.current?.destroy();
-            ydocRef.current?.destroy();
-            editorRef.current = null;
+             console.log("[Yjs Client] Cleanup: Destroying Yjs binding, provider, and doc.");
+             bindingRef.current?.destroy();
+             providerRef.current?.disconnect();
+             providerRef.current?.destroy(); // Ensure provider resources are fully released
+             ydocRef.current?.destroy();
+             editorRef.current = null; // Clear editor ref
 
-            // Cleanup resize listeners
-            if (resizeHandle && resizeHandle.__resizeListener) {
-                resizeHandle.removeEventListener('mousedown', resizeHandle.__resizeListener);
-                delete resizeHandle.__resizeListener;
-            }
-            document.documentElement.removeEventListener('mousemove', resize);
-            document.documentElement.removeEventListener('mouseup', stopResize);
+             // Clear refs
+             bindingRef.current = null;
+             providerRef.current = null;
+             ydocRef.current = null;
+
+             // Cleanup resize listeners
+             if (resizeHandle && resizeHandle.__resizeListener) {
+                 resizeHandle.removeEventListener('mousedown', resizeHandle.__resizeListener);
+                 delete resizeHandle.__resizeListener;
+             }
+             document.documentElement.removeEventListener('mousemove', resize);
+             document.documentElement.removeEventListener('mouseup', stopResize);
         };
     }, []); // Empty dependency array for mount/unmount behavior
 
@@ -152,11 +180,12 @@ export default function EditorPage() {
     // --- Run Code Logic ---
     const runCode = async () => {
         if (!ydocRef.current) {
-            console.error("Yjs document not initialized. Cannot run code.");
-            setOutput("Error: Editor not ready.");
-            setOutputType("error");
-            return;
+             console.error("Yjs document not initialized. Cannot run code.");
+             setOutput("Error: Editor not ready or connection failed.");
+             setOutputType("error");
+             return;
         }
+        // Get code reliably from Yjs doc text type
         const currentCode = ydocRef.current.getText('monaco').toString();
 
         setIsRunning(true);
@@ -164,64 +193,60 @@ export default function EditorPage() {
         setOutputType("success");
 
         try {
-            const { data } = await axios.post("https://unicode-production.up.railway.app/api/run", { code: currentCode, language });
+             const { data } = await axios.post("https://unicode-production.up.railway.app/api/run", { code: currentCode, language });
 
-            if (data.stderr || data.compile_output) {
-                setOutputType("error");
-                setOutput(data.stderr || data.compile_output);
-            } else if (data.stdout) {
-                setOutputType("success");
-                setOutput(data.stdout);
-            } else {
-                setOutputType("warning");
-                setOutput("No output generated or unknown execution state.");
-            }
+             if (data.stderr || data.compile_output) {
+                 setOutputType("error");
+                 setOutput(data.stderr || data.compile_output);
+             } else if (data.stdout !== undefined && data.stdout !== null) { // Check if stdout exists
+                 setOutputType("success");
+                 setOutput(data.stdout === '' ? '(No output)' : data.stdout); // Handle empty stdout
+             } else {
+                 setOutputType("warning");
+                 setOutput("No output generated or unknown execution state.");
+             }
         } catch (error) {
-            console.error("Error running code:", error);
-            setOutputType("error");
-            setOutput(error.response?.data?.message || "Error connecting to execution server. Please try again.");
+             console.error("Error running code:", error);
+             setOutputType("error");
+             setOutput(error.response?.data?.message || "Error connecting to execution server. Please try again.");
         } finally {
-            setIsRunning(false);
+             setIsRunning(false);
         }
     };
     // --- End Run Code Logic ---
 
     // --- Output Panel Styling Helpers ---
     const getOutputHeaderColor = () => {
-        switch (outputType) {
-            case "success": return "bg-gray-700";
-            case "error": return "bg-gray-700 border-l-4 border-red-500";
-            case "warning": return "bg-gray-700 border-l-4 border-yellow-500";
-            default: return "bg-gray-700";
-        }
-    };
+         switch (outputType) {
+             case "success": return "bg-gray-700";
+             case "error": return "bg-gray-700 border-l-4 border-red-500";
+             case "warning": return "bg-gray-700 border-l-4 border-yellow-500";
+             default: return "bg-gray-700";
+         }
+     };
 
     const getOutputTitleColor = () => {
-        switch (outputType) {
-            case "success": return "text-green-400";
-            case "error": return "text-red-400";
-            case "warning": return "text-yellow-400";
-            default: return "text-gray-400";
-        }
-    };
+         switch (outputType) {
+             case "success": return "text-green-400";
+             case "error": return "text-red-400";
+             case "warning": return "text-yellow-400";
+             default: return "text-gray-400";
+         }
+     };
 
     const getOutputTitle = () => {
-        switch (outputType) {
-            case "success": return "Output";
-            case "error": return "Error";
-            case "warning": return "Warning";
-            default: return "Console";
-        }
-    };
+         switch (outputType) {
+             case "success": return "Output";
+             case "error": return "Error";
+             case "warning": return "Warning";
+             default: return "Console";
+         }
+     };
     // --- End Output Panel Styling Helpers ---
 
-    // Log button state for debugging
-    console.log('>>> Button State Check:', {
-        isRunning,
-        providerExists: !!providerRef.current,
-        providerConnected: providerRef.current?.wsconnected,
-        isButtonDisabled: isRunning || !providerRef.current || providerRef.current?.wsconnected === false
-    });
+    // Determine if the run button should be disabled
+    // Disable if: code is running, or not connected to WebSocket
+    const isRunButtonDisabled = isRunning || !isConnected;
 
     return (
         <div className="h-screen flex flex-col bg-gray-900 text-gray-100">
@@ -232,6 +257,10 @@ export default function EditorPage() {
                     <div className="bg-gray-700 px-3 py-1 rounded text-sm" title={`Project ID: ${projectId}`}>
                         Project: {projectId ? projectId.substring(0, 8) + '...' : 'Loading...'}
                     </div>
+                    {/* Connection Status Indicator */}
+                    <span className={`ml-3 h-3 w-3 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`}
+                          title={isConnected ? 'Connected to collaboration server' : 'Disconnected from collaboration server'}>
+                    </span>
                 </div>
 
                 <div className="flex items-center space-x-2">
@@ -239,7 +268,7 @@ export default function EditorPage() {
                         value={language}
                         onChange={(e) => setLanguage(e.target.value)}
                         className="p-2 bg-gray-700 text-gray-200 rounded border-none outline-none focus:ring-1 focus:ring-blue-500"
-                        style={{ WebkitAppearance: "menulist" }}
+                        style={{ WebkitAppearance: "menulist" }} // For better dropdown appearance on Webkit
                     >
                         <option value="javascript">JavaScript</option>
                         <option value="python">Python</option>
@@ -249,9 +278,9 @@ export default function EditorPage() {
 
                     <button
                         onClick={runCode}
-                        disabled={isRunning || !providerRef.current || providerRef.current?.wsconnected === false}
-                        className={`px-4 py-2 rounded-md flex items-center space-x-2 transition-colors ${isRunning || !providerRef.current || providerRef.current?.wsconnected === false ? 'bg-gray-600 cursor-not-allowed opacity-70' : 'bg-blue-600 hover:bg-blue-500'}`}
-                        title={!providerRef.current || providerRef.current?.wsconnected === false ? "Connecting to collaboration server..." : "Run Code"}
+                        disabled={isRunButtonDisabled}
+                        className={`px-4 py-2 rounded-md flex items-center space-x-2 transition-colors ${isRunButtonDisabled ? 'bg-gray-600 cursor-not-allowed opacity-70' : 'bg-blue-600 hover:bg-blue-500'}`}
+                        title={!isConnected ? "Connecting to collaboration server..." : isRunning ? "Code is running..." : "Run Code"}
                     >
                         {isRunning ? (
                             <> {/* Running Indicator */}
@@ -276,7 +305,7 @@ export default function EditorPage() {
             {/* Editor Section */}
             <div className="flex-1 overflow-hidden">
                 <MonacoEditor
-                    height="100%"
+                    height="100%" // Ensure editor fills the container
                     language={language}
                     theme="vs-dark"
                     onMount={handleEditorDidMount} // Setup Yjs binding here
@@ -284,9 +313,13 @@ export default function EditorPage() {
                         minimap: { enabled: true },
                         scrollBeyondLastLine: false,
                         fontSize: 14,
-                        fontFamily: "'Fira Code', monospace", // Ensure font is loaded
-                        automaticLayout: true,
+                        fontFamily: "'Fira Code', monospace", // Ensure font is available or use a common fallback
+                        fontLigatures: true, // Enable font ligatures if Fira Code supports them
+                        automaticLayout: true, // Adjusts editor layout on container resize
+                        wordWrap: "on", // Optional: wrap long lines
+                        padding: { top: 10 } // Optional: add some padding
                     }}
+                    // value={/* Do not set value directly when using Yjs binding */}
                 />
             </div>
 
@@ -304,14 +337,12 @@ export default function EditorPage() {
                         <span className={getOutputTitleColor()}>{getOutputTitle()}</span>
                     </div>
                     <div className="text-xs text-gray-400">
-                        {outputType === "success" && output && "Completed"}
-                        {outputType === "error" && "Failed"}
-                        {outputType === "warning" && "Completed with warnings"}
+                        {/* Status message */}
                     </div>
                 </div>
 
                 <div className="p-4 flex-1 overflow-auto font-mono text-sm bg-gray-800 text-gray-200">
-                    {output ? (
+                    {output !== null && output !== undefined ? ( // Check if output exists
                         <pre className="whitespace-pre-wrap break-words">{output}</pre>
                     ) : (
                         <div className="flex h-full items-center justify-center text-gray-500 italic">
