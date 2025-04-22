@@ -49,7 +49,7 @@ export default function EditorPage() {
 
         // --- Pass token in WebsocketProvider options ---
         const provider = new WebsocketProvider(
-            'wss://unicode-37d2.onrender.com', // Your backend WebSocket endpoint URL
+            'wss://unicode-production.up.railway.app', // Your backend WebSocket endpoint URL
             projectId,                         // Room name (using projectId)
             doc,                               // Yjs document
             {
