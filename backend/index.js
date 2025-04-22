@@ -14,7 +14,7 @@ const jwt = require('jsonwebtoken');
 const connectDB = require('./config/db');
 
 // --- Import Mongoose Models ---
-const Project = require('./models/Project'); // <-- Import Project model (adjust path if needed)
+const Project = require('./models/project'); // <-- Import Project model (adjust path if needed)
 // const User = require('./models/User'); // User model might not be needed directly here if JWT is sufficient
 
 // --- Mongoose Schema for Yjs Docs ---
