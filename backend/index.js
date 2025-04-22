@@ -1,120 +1,261 @@
+// --- Backend server file (e.g., server.js) ---
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
 const { Server } = require('socket.io');
-const WebSocket = require('ws'); // <-- Import WebSocket library
-const { setupWSConnection } = require('y-websocket/bin/utils'); // <-- Import Yjs utility
+const WebSocket = require('ws');
+const Y = require('yjs');
+const syncProtocol = require('y-protocols/sync');
+const awarenessProtocol = require('y-protocols/awareness');
+const map = require('lib0/map');
+const mongoose = require('mongoose'); // <-- For Persistence
+const jwt = require('jsonwebtoken'); // <-- For Auth
 const connectDB = require('./config/db');
 
-// --- CORS Configuration ---
-// Define allowed origins for both HTTP CORS and Socket.IO/WebSocket CORS
-const allowedOrigins = [
-    'https://unicode-two.vercel.app', // Your frontend deployment
-    'http://localhost:3000',        // Common local dev ports
-    'http://localhost:5173',
-    // Add any other origins you need to allow
-];
+// --- Mongoose Schema for Yjs Docs ---
+const YjsDocSchema = new mongoose.Schema({
+    name: { type: String, required: true, index: true }, // room name / projectId
+    data: { type: Buffer, required: true },      // Yjs document update binary data
+}, { timestamps: true }); // Add timestamps
 
-const corsOptions = {
-    origin: function (origin, callback) {
-        // Allow requests with no origin (like mobile apps or curl requests) or if origin is allowed
-        if (!origin || allowedOrigins.indexOf(origin) !== -1) {
-            callback(null, true);
-        } else {
-            const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
-            callback(new Error(msg), false);
+const YjsDocModel = mongoose.model('YjsDoc', YjsDocSchema);
+console.log('[Persistence] Mongoose model for YjsDoc registered.');
+
+// --- Persistence Functions ---
+
+// Debounced save function map (to avoid saving too frequently)
+const debouncedSave = new Map(); // Map<string, NodeJS.Timeout>
+const debounceTimeout = 5000; // Save after 5 seconds of inactivity
+
+const saveYDoc = async (doc) => {
+    const roomName = doc.name;
+    // Clear any existing debounce timer for this room
+    if (debouncedSave.has(roomName)) {
+        clearTimeout(debouncedSave.get(roomName));
+    }
+
+    // Set a new timer
+    debouncedSave.set(roomName, setTimeout(async () => {
+        console.log(`[Persistence] Debounced save triggered for room: ${roomName}`);
+        try {
+            const dataToSave = Y.encodeStateAsUpdate(doc); // Get document state as a binary update
+            // Upsert: update if exists, insert if new
+            await YjsDocModel.findOneAndUpdate(
+                { name: roomName },
+                { data: Buffer.from(dataToSave) }, // Store as Buffer
+                { upsert: true, new: true }
+            );
+            console.log(`[Persistence] Successfully saved doc for room: ${roomName}`);
+        } catch (error) {
+            console.error(`[Persistence] Error saving document for room ${roomName}:`, error);
+        } finally {
+             debouncedSave.delete(roomName); // Clear timer entry after execution
         }
-    },
-    methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
-    credentials: true // If you might need cookies/auth headers later
+    }, debounceTimeout));
 };
 
+
+// --- WSSharedDoc Class (Modified for Persistence Trigger) ---
+class WSSharedDoc extends Y.Doc {
+    constructor(name) {
+        super({ gc: true });
+        this.name = name;
+        this.awareness = new awarenessProtocol.Awareness(this);
+        this.awareness.setLocalState(null);
+        this.conns = new Map(); // Map<WebSocket, Set<number>>
+
+        // Trigger debounced save on document update
+        this.on('update', (update, origin) => {
+            this._updateHandler(update, origin);
+            // Trigger save whenever the document changes (debounced)
+            saveYDoc(this); // Pass the current doc instance
+        });
+        // Trigger save on awareness change too? Optional, depends if you need to persist awareness often.
+        this.awareness.on('update', this._awarenessUpdateHandler.bind(this));
+    }
+
+     _awarenessUpdateHandler({ added, updated, removed }, conn) {
+         // ... (same awareness broadcasting logic as before) ...
+         const changedClients = added.concat(updated, removed);
+         if (conn !== null) { /* handle connControlledIDs */ }
+         const encoder = awarenessProtocol.encodeAwarenessUpdate(this.awareness, changedClients);
+         const message = awarenessProtocol.encodeAwarenessMessage(encoder);
+         this.conns.forEach((_, c) => { /* send message */ });
+     }
+
+     _updateHandler(update, origin) {
+         // ... (same document update broadcasting logic as before) ...
+         const encoder = syncProtocol.writeUpdate(update);
+         const message = syncProtocol.encodeSyncMessage(encoder);
+         this.conns.forEach((_, conn) => { /* send message if conn !== origin */ });
+     }
+
+    addConnection(conn) {
+        // ... (same logic as before: add to this.conns, send sync step 1, send awareness) ...
+         this.conns.set(conn, new Set());
+         const encoder = syncProtocol.writeSyncStep1(this);
+         conn.send(syncProtocol.encodeSyncMessage(encoder));
+         if (this.awareness.getStates().size > 0) { /* send awareness update */ }
+    }
+
+    removeConnection(conn) {
+        // ... (same logic as before: remove from awareness, delete from this.conns) ...
+         const controlledIds = this.conns.get(conn);
+         this.conns.delete(conn);
+         if (controlledIds) { /* remove awareness states */ }
+
+        // Persistence Logic (Save on last disconnect - optional if using debounced save)
+        // if (this.conns.size === 0) {
+        //    console.log(`[Persistence] Last client disconnected from ${this.name}. Triggering final save.`);
+        //    saveYDoc(this); // Ensure final save happens immediately
+        //    // Optional: Clear from memory if persistence is reliable
+        //    // docs.delete(this.name);
+        // }
+    }
+}
+
+// --- Modified getYDoc to Load from DB ---
+const getYDoc = (docname, gc = true) => map.setIfUndefined(docs, docname, () => {
+    const doc = new WSSharedDoc(docname); // Use custom class
+    console.log(`[Manual Yjs] Trying to load or create doc for room: ${docname}`);
+
+    // ** Load document state from database **
+    YjsDocModel.findOne({ name: docname }).then(dbDoc => {
+        if (dbDoc && dbDoc.data) {
+            console.log(`[Persistence] Found existing doc in DB for room: ${docname}. Applying update.`);
+            // Apply the saved state as an update to the new Y.Doc
+            Y.applyUpdate(doc, dbDoc.data);
+        } else {
+            console.log(`[Persistence] No existing doc found in DB for room: ${docname}. Starting fresh.`);
+            // Optionally populate with default content if needed
+            // doc.getText('monaco').insert(0, '// Start coding here');
+        }
+         // Trigger initial save after loading/creating (starts debounce timer)
+         saveYDoc(doc);
+    }).catch(err => {
+        console.error(`[Persistence] Error loading document for room ${docname}:`, err);
+        // Decide how to handle loading errors - start fresh or close connection?
+    });
+
+    docs.set(docname, doc);
+    return doc;
+});
+
+
+
+
+// --- Express App Setup ---
 const app = express();
-app.use(cors(corsOptions)); // Use configured CORS for HTTP requests
+app.use(cors());
 app.use(express.json());
 
 // --- Database Connection ---
 connectDB();
 
 // --- HTTP Server Setup ---
-const server = http.createServer(app); // Create HTTP server from Express app
+const server = http.createServer(app);
 
-// --- Initialize Yjs WebSocket Server (wss) ---
-const wss = new WebSocket.Server({
-    server // Attach Yjs WebSocket server to the SAME http server
-});
+// --- Initialize WebSocket Server (wss) for Yjs ---
+const wss = new WebSocket.Server({ server });
+console.log('[Manual Yjs] WebSocket server initialized.');
 
-console.log('[Yjs Server] WebSocket server initialized and attached to HTTP server.');
+// --- Handle WebSocket Connections (With Auth & Persistence Hooks) ---
+wss.on('connection', async (ws, req) => { // Make handler async
+    console.log('[Manual Yjs] Client attempting WebSocket connection...');
+    let roomName = 'default-room'; // Fallback
+    let user = null; // To store authenticated user info
 
-// --- Handle Yjs WebSocket Connections ---
-wss.on('connection', (ws, req) => {
-    // req: IncomingMessage - contains headers, url etc. Can be used for auth later.
-    // ws: WebSocket instance for the connected client.
-    console.log('[Yjs Server] Client attempting WebSocket connection...');
-
-    // Use the y-websocket utility to handle Yjs protocol syncing for this connection
-    // It internally associates clients based on the 'room' derived from the connection URL path
-    // (e.g., ws://yourserver.com/projectId - y-websocket extracts 'projectId')
-    // Ensure your frontend WebsocketProvider connects like: new WebsocketProvider('ws://...', projectId, ydoc)
     try {
-        setupWSConnection(ws, req);
-        console.log(`[Yjs Server] Connection established & setup for client. URL: ${req.url}`);
-    } catch (error) {
-        console.error(`[Yjs Server] Failed to setup Yjs connection: ${error.message}`);
-        ws.close(); // Close connection if setup fails
-    }
+        // --- Authentication ---
+        const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
+        const token = parsedUrl.searchParams.get('token'); // Get JWT from ?token=... query param
 
-    // Optional: Handle ws errors and closes specifically if needed
-    ws.on('error', (error) => {
-      console.error('[Yjs Server] WebSocket error:', error);
-    });
-    ws.on('close', (code, reason) => {
-      // Reason might not always be available depending on client/network
-      const reasonString = reason ? reason.toString() : 'No reason given';
-      console.log(`[Yjs Server] WebSocket closed. Code: ${code}, Reason: ${reasonString}`);
-      // Cleanup related to this specific ws connection might happen here if using custom persistence/auth
-    });
-});
-
-
-// --- Initialize Existing Socket.IO Server (io) ---
-// You might keep this for other real-time features NOT handled by Yjs (e.g., presence, chat)
-// IMPORTANT: Restrict CORS origin here as well!
-const io = new Server(server, {
-    cors: corsOptions // Use the same CORS options as Express
-});
-
-console.log('[Socket.IO] Server initialized and attached to HTTP server.');
-
-// --- Handle Regular Socket.IO Connections ---
-io.on('connection', (socket) => {
-    console.log(`[Socket.IO] User connected: ${socket.id}`);
-
-    // Keep for logging or potential non-Yjs features. Yjs manages its own rooms.
-    socket.on('joinProject', ({ projectId }) => {
-        if (projectId) {
-             console.log(`[Socket.IO] User ${socket.id} joining project room (for non-Yjs events): ${projectId}`);
-             socket.join(projectId); // Join Socket.IO room
-        } else {
-            console.warn(`[Socket.IO] User ${socket.id} tried to join project with invalid projectId.`);
+        if (!token) {
+            console.warn('[Auth] No token provided. Closing connection.');
+            ws.close(4001, 'Unauthorized: No token');
+            return;
         }
-    });
 
-    // --- THIS IS NOW HANDLED BY Yjs ---
-    // Commented out to prevent duplicate/conflicting code updates
-    /*
-    socket.on('codeChange', ({ projectId, code }) => {
-        console.log(`[Socket.IO] Received codeChange (DEPRECATED) from ${socket.id} for ${projectId}`);
-        // Broadcasting full code via Socket.IO is replaced by Yjs delta updates via ws
-        // io.to(projectId).emit('codeChange', { code });
-    });
-    */
+        try {
+            // Verify the token (replace with your actual verification logic)
+            const decoded = jwt.verify(token, process.env.JWT_SECRET);
+            user = decoded; // Store decoded payload (e.g., { userId: '...' })
+            console.log(`[Auth] Token verified successfully for user ID: ${user.userId || 'N/A'}`);
+        } catch (err) {
+            console.warn(`[Auth] Invalid token: ${err.message}. Closing connection.`);
+            ws.close(4002, 'Unauthorized: Invalid token');
+            return;
+        }
 
-    socket.on('disconnect', (reason) => {
-        console.log(`[Socket.IO] User disconnected: ${socket.id}. Reason: ${reason}`);
-    });
+        // Determine room name (e.g., from path /projectId)
+        const pathSegments = parsedUrl.pathname.split('/').filter(Boolean);
+        if (pathSegments.length > 0) {
+            roomName = pathSegments[0];
+        } else {
+             console.warn(`[Manual Yjs] Could not derive room name from URL: ${req.url}. Using default.`);
+            // Potentially close connection if room is mandatory
+            // ws.close(1011, 'Cannot determine room'); return;
+        }
+        console.log(`[Manual Yjs] Client trying to access room: ${roomName}`);
+
+        // --- Authorization ---
+        // ** TODO: Replace with your actual permission check **
+        // Check if 'user' has permission to access 'roomName' (projectId)
+        const hasPermission = await checkUserPermission(user.userId, roomName); // Assume this function exists
+        if (!hasPermission) {
+            console.warn(`[Auth] User ${user.userId} denied access to room ${roomName}. Closing connection.`);
+            ws.close(4003, 'Forbidden');
+            return;
+        }
+        console.log(`[Auth] User ${user.userId} granted access to room ${roomName}.`);
+
+        // --- Yjs Setup (if authorized) ---
+        const ydoc = getYDoc(roomName); // Get or create & load the WSSharedDoc
+        ydoc.addConnection(ws); // Add connection (sends initial state)
+
+        // Handle messages
+        const messageListener = (message) => { /* ... same message handling as before ... */ };
+        ws.on('message', messageListener);
+
+        // Handle close
+        const closeListener = () => {
+            console.log(`[Manual Yjs] Client disconnected from room: ${roomName} (User: ${user?.userId})`);
+            ydoc.removeConnection(ws);
+        };
+        ws.on('close', closeListener);
+
+        // Handle error
+        ws.on('error', (error) => {
+            console.error(`[Manual Yjs] WebSocket error for room ${roomName} (User: ${user?.userId}):`, error);
+            ydoc.removeConnection(ws);
+            ws.close(1011, 'WebSocket error');
+        });
+
+        console.log(`[Manual Yjs] Client connection fully setup for room: ${roomName} (User: ${user?.userId})`);
+
+    } catch (error) {
+        // Catch any unexpected errors during connection setup
+        console.error('[Manual Yjs] Unexpected error during connection setup:', error);
+        ws.close(1011, 'Internal server error during connection setup');
+    }
 });
+
+// --- Placeholder for Authorization Logic ---
+// Replace this with your actual logic to check user permissions for a project
+async function checkUserPermission(userId, projectId) {
+    console.log(`[Auth Check] Checking if user ${userId} can access project ${projectId}`);
+    // Example: Look up user and project in your database
+    // const user = await User.findById(userId);
+    // const project = await Project.findById(projectId);
+    // if (user && project && project.allowedUsers.includes(userId)) { return true; }
+    // For now, allow everyone for testing (REMOVE THIS IN PRODUCTION)
+    return true;
+}
+
+
+// --- Initialize Existing Socket.IO Server (io) --- (Optional)
+// ... (same as before, keep if needed for other features) ...
 
 // --- API Routes ---
 app.use('/api/auth', require('./routes/auth'));
@@ -124,6 +265,3 @@ app.use("/api", require("./routes/runCode"));
 // --- Start Server ---
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => console.log(`[Server] HTTP & WebSocket server running on port ${PORT}`));
-
-// Optional: Export server if needed by tests or other scripts
-// module.exports = server;

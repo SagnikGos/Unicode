@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useParams } from "react-router-dom";
-import MonacoEditor, { Monaco } from "@monaco-editor/react"; // Import Monaco type
+import MonacoEditor from "@monaco-editor/react"; // Import Monaco type
 import axios from "axios";
 
 // --- Yjs Imports ---
