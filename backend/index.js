@@ -13,24 +13,18 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const connectDB = require('./config/db');
 
-// --- Import Mongoose Models ---
-const Project = require('./models/project'); // Adjust path if needed
-// const User = require('./models/User');
+const Project = require('./models/project');
 
-// --- Mongoose Schema for Yjs Docs ---
 const YjsDocSchema = new mongoose.Schema({
-    name: { type: String, required: true, index: true }, // Corresponds to projectId / room name
+    name: { type: String, required: true, index: true },
     data: { type: Buffer, required: true },
 }, { timestamps: true });
 const YjsDocModel = mongoose.model('YjsDoc', YjsDocSchema);
 console.log('[Persistence] Mongoose model for YjsDoc registered.');
 
-// --- Persistence (In-Memory Map) ---
-const docs = new Map(); // Map<string, WSSharedDoc>
-
-// --- Persistence Functions (Debounced Save to DB) ---
-const debouncedSave = new Map(); // Map<string, NodeJS.Timeout>
-const debounceTimeout = 5000; // Save after 5 seconds of inactivity
+const docs = new Map();
+const debouncedSave = new Map();
+const debounceTimeout = 5000;
 
 const saveYDoc = async (doc) => {
     const roomName = doc.name;
@@ -55,19 +49,17 @@ const saveYDoc = async (doc) => {
     }, debounceTimeout));
 };
 
-
-// --- WSSharedDoc Class (Handles Yjs Doc & Awareness for a room) ---
 class WSSharedDoc extends Y.Doc {
     constructor(name) {
         super({ gc: true });
         this.name = name;
         this.awareness = new awarenessProtocol.Awareness(this);
         this.awareness.setLocalState(null);
-        this.conns = new Map(); // Map<WebSocket, Set<ClientID>>
+        this.conns = new Map();
 
         this.on('update', (update, origin) => {
             this._updateHandler(update, origin);
-            saveYDoc(this); // Debounced save on update
+            saveYDoc(this);
         });
         this.awareness.on('update', this._awarenessUpdateHandler.bind(this));
     }
@@ -98,51 +90,26 @@ class WSSharedDoc extends Y.Doc {
         });
      }
 
-    // --- *** MODIFIED addConnection for Debugging *** ---
     addConnection(conn) {
         console.log(`[WSSharedDoc ${this.name}] Adding connection...`);
         this.conns.set(conn, new Set());
 
-        // --- Send Sync Step 1 ---
         console.log(`[WSSharedDoc ${this.name}] Preparing SyncStep1...`);
-        const syncEncoder = syncProtocol.writeSyncStep1(this); // Error originates from here or within this call chain
+        const syncEncoder = syncProtocol.writeSyncStep1(this);
         try {
              console.log(`[WSSharedDoc ${this.name}] Sending SyncStep1...`);
-             conn.send(syncProtocol.encodeSyncMessage(syncEncoder)); // Sends the document state sync
+             conn.send(syncProtocol.encodeSyncMessage(syncEncoder));
          } catch (e) {
              console.error(`[WSSharedDoc ${this.name}] Error sending SyncStep1:`, e);
              conn.close();
-             this.removeConnection(conn); // Clean up if send fails
+             this.removeConnection(conn);
              return;
          }
         console.log(`[WSSharedDoc ${this.name}] SyncStep1 sent.`);
 
-        // --- **** Temporarily COMMENTED OUT Awareness Sending **** ---
         console.log(`[WSSharedDoc ${this.name}] SKIPPING initial Awareness sending for debugging.`);
-        /* <-- Start comment block for debugging
-        if (this.awareness.getStates().size > 0) {
-            console.log(`[WSSharedDoc ${this.name}] Preparing initial Awareness state...`);
-            const awarenessEncoder = awarenessProtocol.encodeAwarenessUpdate(this.awareness, Array.from(this.awareness.getStates().keys()));
-             try {
-                 console.log(`[WSSharedDoc ${this.name}] Sending initial Awareness state...`);
-                 conn.send(awarenessProtocol.encodeAwarenessMessage(awarenessEncoder)); // Sends awareness state
-             } catch (e) {
-                 console.error(`[WSSharedDoc ${this.name}] Error sending Awareness:`, e);
-                 conn.close();
-                 this.removeConnection(conn); // Clean up if send fails
-                 return;
-             }
-             console.log(`[WSSharedDoc ${this.name}] Initial Awareness state sent.`);
-        } else {
-             console.log(`[WSSharedDoc ${this.name}] No initial Awareness states to send.`);
-        }
-        */ // <-- End comment block for debugging
-        // --- **** End Temporarily Commented Out Block **** ---
-
-         console.log(`[WSSharedDoc ${this.name}] Connection added (awareness skipped for test).`);
+        console.log(`[WSSharedDoc ${this.name}] Connection added (awareness skipped for test).`);
     }
-    // --- *** End MODIFIED addConnection *** ---
-
 
     removeConnection(conn) {
         const controlledIds = this.conns.get(conn);
@@ -152,10 +119,7 @@ class WSSharedDoc extends Y.Doc {
         }
     }
 }
-// --- End WSSharedDoc Class ---
 
-
-// --- UPDATED getYDoc Function ---
 const getYDoc = (docname, gc = true) => {
     let doc = docs.get(docname);
     if (doc === undefined) {
@@ -180,32 +144,23 @@ const getYDoc = (docname, gc = true) => {
     console.log(`[getYDoc] Returning doc for room ${docname}. Has addConnection method? ${typeof doc?.addConnection === 'function'}`);
     return doc;
 };
-// --- End UPDATED getYDoc Function ---
 
+const allowedOrigins = [];
+const corsOptions = {};
 
-// --- CORS Configuration ---
-const allowedOrigins = [ /* ... */ ]; // Make sure your frontend URL is here
-const corsOptions = { /* ... */ };
-
-// --- Express App Setup ---
 const app = express();
 app.use(cors(corsOptions));
 app.use(express.json());
 
-// --- Database Connection ---
 connectDB();
 
-// --- HTTP Server Setup ---
 const server = http.createServer(app);
 
-// --- Initialize WebSocket Server (wss) for Yjs ---
 const wss = new WebSocket.Server({ noServer: true });
 console.log('[Manual Yjs] WebSocket server initialized (manual upgrade).');
 
-// --- Handle HTTP Server Upgrade Requests ---
-server.on('upgrade', (request, socket, head) => { /* ... same as before ... */ });
+server.on('upgrade', (request, socket, head) => { /* ... */ });
 
-// --- Handle WebSocket Connections ---
 wss.on('connection', (ws, req) => {
     const roomName = ws.roomId || 'default-room';
     const userId = ws.userId || 'unknown';
@@ -217,10 +172,8 @@ wss.on('connection', (ws, req) => {
              ws.close(1011, 'Internal Server Error: Document initialization failed');
              return;
         }
-        // Call the modified addConnection (with awareness commented out)
         ydoc.addConnection(ws);
 
-        // Setup message/close/error listeners (same as before)
         const messageListener = (message) => { /* ... */ };
         ws.on('message', messageListener);
         const closeListener = () => { /* ... */ };
@@ -236,18 +189,13 @@ wss.on('connection', (ws, req) => {
     }
 });
 
-// --- Authorization Logic Implementation ---
-async function checkUserPermission(userId, projectId) { /* ... same as before ... */ }
+async function checkUserPermission(userId, projectId) { /* ... */ }
 
-// --- Initialize Existing Socket.IO Server (io) --- (Optional)
 const io = new Server(server, { cors: corsOptions });
-// ... io setup ...
 
-// --- API Routes ---
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/projects', require('./routes/project'));
 app.use("/api", require("./routes/runCode"));
 
-// --- Start Server ---
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, '0.0.0.0', () => console.log(`[Server] HTTP & WebSocket server running on host 0.0.0.0, port ${PORT}`));
+server.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT}`));
