@@ -1,7 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const { body, validationResult } = require('express-validator'); // For potential validation
-const Project = require('../models/Project'); // Correct path to your Project model
+const Project = require('../models/project'); // Correct path to your Project model
 const authMiddleware = require('../middleware/auth'); // Import your auth middleware
 
 const router = express.Router();
