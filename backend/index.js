@@ -258,13 +258,15 @@ const getYDoc = (docname) => {
 };
 
 // --- Server Setup ---
-const allowedOrigins = process.env.CORS_ALLOWED_ORIGINS ? process.env.CORS_ALLOWED_ORIGINS.split(',') : ['http://localhost:3000', "https://unicode-two.vercel.app"]; // Default for local dev
+// Updated allowedOrigins based on previous context, ensure this matches your frontend URLs
+const allowedOrigins = process.env.CORS_ALLOWED_ORIGINS ? process.env.CORS_ALLOWED_ORIGINS.split(',') : ['http://localhost:3000', "https://unicode-two.vercel.app"];
 const corsOptions = {
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
     if (allowedOrigins.indexOf(origin) === -1) {
-      const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+      const msg = `The CORS policy for this site does not allow access from the specified Origin: ${origin}`;
+      console.error(msg); // Log CORS errors for easier debugging
       return callback(new Error(msg), false);
     }
     return callback(null, true);
@@ -290,7 +292,6 @@ console.log('[Manual Yjs] WebSocket server initialized (manual upgrade).');
 // --- WebSocket Upgrade Handling & Authentication ---
 server.on('upgrade', async (request, socket, head) => {
     console.log('[Upgrade] Received upgrade request.');
-    let S
     let userId;
     let projectId; // This will be our roomName
 
@@ -299,8 +300,10 @@ server.on('upgrade', async (request, socket, head) => {
         const token = parsedUrl.query.token;
         projectId = parsedUrl.query.projectId; // Use projectId as the room identifier
 
+        // Initial checks for parameters
         if (!token || !projectId) {
-            console.error('[Upgrade] Failed: Missing token or projectId in query parameters.');
+            console.error(`[Upgrade] Failed: Missing token (${!token ? 'yes' : 'no'}) or projectId (${!projectId ? 'yes' : 'no'}) in query parameters.`);
+            console.error(`[Upgrade] Received URL: ${request.url}`); // Log the URL
             socket.write('HTTP/1.1 400 Bad Request\r\n\r\n'); // Send error response
             socket.destroy();
             return;
@@ -309,12 +312,35 @@ server.on('upgrade', async (request, socket, head) => {
         // 1. Verify JWT Token
         console.log(`[Upgrade] Attempting to verify token for projectId: ${projectId}`);
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        userId = decoded.userId; // Assumes your JWT payload has userId
-        console.log(`[Upgrade] Token verified for userId: ${userId}`);
+        console.log('[Upgrade] Decoded JWT Payload:', decoded); // Log the decoded payload
+
+        // --- FIX: Use the 'id' field from the payload ---
+        // userId = decoded.userId; // OLD - Incorrect key
+        userId = decoded.id;       // NEW - Use the key 'id' matching the signing process
+        // --- END FIX ---
+
+        // Add a check to ensure userId was actually found in the payload
+        if (!userId) {
+            console.error('[Upgrade] Failed: User ID missing from token payload (key "id").');
+            socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); // Correct status for missing auth info within token
+            socket.destroy();
+            return;
+        }
+
+        console.log(`[Upgrade] Token verified for userId: ${userId}`); // Should now log the actual ID
+
 
         // 2. Check User Permissions
         console.log(`[Upgrade] Checking permissions for userId: ${userId} on projectId: ${projectId}`);
-        const hasPermission = await checkUserPermission(userId, projectId);
+        // Add check for valid projectId format *before* calling DB function if desired
+        if (!mongoose.Types.ObjectId.isValid(projectId)) {
+            console.warn(`[Upgrade] Invalid projectId format detected: ${projectId}. Rejecting.`);
+            socket.write('HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\n\r\nInvalid Project ID format.');
+            socket.destroy();
+            return;
+        }
+
+        const hasPermission = await checkUserPermission(userId, projectId); // userId should be valid now
         if (!hasPermission) {
             console.error(`[Upgrade] Failed: User ${userId} does not have permission for project ${projectId}.`);
             socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); // Send forbidden response
@@ -334,10 +360,12 @@ server.on('upgrade', async (request, socket, head) => {
 
     } catch (error) {
         console.error('[Upgrade] Failed during upgrade process:', error.message);
-         // Handle specific errors (e.g., JWT expiration)
+         // Handle specific errors (e.g., JWT verification errors)
         if (error instanceof jwt.JsonWebTokenError || error instanceof jwt.TokenExpiredError) {
              socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         } else {
+            // Log unexpected errors for better debugging
+            console.error('[Upgrade] Unexpected Error:', error);
             socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n');
         }
         socket.destroy();
@@ -440,24 +468,33 @@ wss.on('connection', (ws, req) => {
 });
 
 // --- Permission Checking Function ---
-// This is a placeholder. Replace with your actual permission logic.
+// Checks if user has access to project AND if IDs are valid formats
 async function checkUserPermission(userId, projectId) {
     console.log(`[Permissions] Checking if user ${userId} can access project ${projectId}`);
-    if (!mongoose.Types.ObjectId.isValid(userId) || !mongoose.Types.ObjectId.isValid(projectId)) {
-        console.warn(`[Permissions] Invalid userId (${userId}) or projectId (${projectId}) format.`);
+
+    // Format validation is now primarily handled in the upgrade handler,
+    // but keeping it here as a secondary check is fine.
+    if (!mongoose.Types.ObjectId.isValid(userId) /* || !mongoose.Types.ObjectId.isValid(projectId) */ ) {
+        // We already validate projectId format in the upgrade handler now,
+        // so only userId validation might be strictly needed here if called elsewhere.
+        console.warn(`[Permissions] Invalid userId format: ${userId}.`);
         return false;
     }
+    // Removed projectId format check here as it's done before calling this function in upgrade handler.
+
     try {
-        const project = await Project.findById(projectId).select('members owner'); // Adjust fields as needed
+        // Find project, only selecting necessary fields
+        const project = await Project.findById(projectId).select('members owner').lean(); // Use lean() for performance if not modifying project object
+
         if (!project) {
             console.log(`[Permissions] Project ${projectId} not found.`);
             return false; // Project doesn't exist
         }
 
-        // Example: Check if the user is the owner or in the members array
-        // Adjust this logic based on your actual Project schema structure
-        const isOwner = project.owner && project.owner.toString() === userId;
-        const isMember = project.members && project.members.some(memberId => memberId.toString() === userId);
+        // Check if the user is the owner or in the members array
+        // Ensure comparison is done with strings
+        const isOwner = project.owner?.toString() === userId; // Use optional chaining
+        const isMember = project.members?.some(memberId => memberId.toString() === userId); // Use optional chaining
 
         if (isOwner || isMember) {
              console.log(`[Permissions] Access granted for user ${userId} to project ${projectId}.`);
@@ -474,7 +511,6 @@ async function checkUserPermission(userId, projectId) {
 
 // --- Socket.IO Server (if still needed for other purposes) ---
 // Note: This Socket.IO instance is separate from the 'ws' WebSocket server used for Yjs.
-// If Yjs is the primary real-time mechanism, you might not need Socket.IO.
 const io = new SocketIOServer(server, { cors: corsOptions });
 
 // Example Socket.IO connection handler (if used)
@@ -490,6 +526,7 @@ io.on('connection', (socket) => {
 app.get('/', (req, res) => { // Basic health check / root route
     res.send('Collaboration Server is running.');
 });
+// Ensure these route files exist and export Express routers
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/projects', require('./routes/project'));
 app.use("/api", require("./routes/runCode")); // Assuming this handles code execution requests
