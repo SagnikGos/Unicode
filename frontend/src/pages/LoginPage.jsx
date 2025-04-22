@@ -1,95 +1,105 @@
-import React, { useState } from "react"; // Removed unused imports for brevity
+import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import axios from "axios";
 
-// Consider renaming this component if it's more for joining/creating projects
-// than general login, e.g., ProjectAccessPage
-export default function LoginPage() {
-    const [projectId, setProjectId] = useState("");
+// Renamed for clarity, reflects its function better
+export default function ProjectAccessPage() {
+    const [projectIdInput, setProjectIdInput] = useState(""); // What the user types
     const [password, setPassword] = useState("");
-    const [error, setError] = useState(""); // Added state for error messages
-    const [isLoading, setIsLoading] = useState(false); // Added loading state
+    const [error, setError] = useState("");
+    const [isLoading, setIsLoading] = useState(false);
     const navigate = useNavigate();
 
     const joinProject = async () => {
-        setError(""); // Clear previous errors
-        setIsLoading(true); // Set loading state
+        setError("");
+        setIsLoading(true);
 
-        // --- ** START: Added Token Handling ** ---
-        // 1. Retrieve the token from storage
-        // !!! Replace 'authToken' with the actual key you use !!!
-        const token = localStorage.getItem('token');
+        const token = localStorage.getItem('token'); // Ensure 'token' is your correct key
 
         if (!token) {
-            setError("Authentication error: You must be logged in to join or create a project.");
+            setError("Authentication error: Please log in first.");
             setIsLoading(false);
-            return; // Stop if not logged in
+            return;
         }
 
-        // 2. Create Axios request config with Authorization header
         const config = {
             headers: {
                 'Content-Type': 'application/json',
-                // Include the Bearer token
                 'Authorization': `Bearer ${token}`
             }
         };
-        // --- ** END: Added Token Handling ** ---
 
         try {
-            const body = { projectId, password };
-            // 3. Send request with data AND config (including headers)
-            await axios.post("https://unicode-production.up.railway.app/api/projects/join", body, config);
+            // Send the projectId typed by the user (it might be a name for creation, or an ID for joining)
+            const body = { projectId: projectIdInput, password };
 
-            // If successful, navigate to the editor
-            navigate(`/editor/${projectId}`);
+            // --- FIX: Capture the response data ---
+            const { data } = await axios.post(
+                "https://unicode-production.up.railway.app/api/projects/join", // Or potentially a create/join endpoint
+                body,
+                config
+            );
+
+            // --- FIX: Extract the *actual* projectId returned by the backend ---
+            // *** CRITICAL: Adjust 'data.projectId' based on your actual API response structure ***
+            // Your backend MUST return the definitive ObjectId here.
+            const actualProjectId = data.projectId;
+
+            if (!actualProjectId) {
+                 // Handle case where backend didn't return the expected ID
+                 console.error("Backend response missing required projectId field:", data);
+                 setError("Failed to get valid project ID from server response. Please check API.");
+                 setIsLoading(false);
+                 return;
+            }
+
+            // --- FIX: Navigate using the ID from the backend response ---
+            navigate(`/editor/${actualProjectId}`);
 
         } catch (err) {
             console.error("Error joining/creating project:", err);
-            // Improve error message based on response
             let message = "An unexpected error occurred.";
             if (err.response) {
-                // Use error message from backend if available
                 message = err.response.data?.errors?.[0]?.msg || err.response.data?.msg || `Server error: ${err.response.status}`;
             } else if (err.request) {
-                message = "No response from server. Please check your connection.";
+                message = "No response from server. Check connection or backend status.";
             } else {
                 message = err.message;
             }
-            setError(message); // Set specific error message
-            // Removed alert("Invalid Project ID or Password"); use state instead
+            setError(message);
         } finally {
-             setIsLoading(false); // Reset loading state
+            setIsLoading(false);
         }
     };
 
     return (
         <div className="flex flex-col items-center justify-center h-screen bg-gray-900 text-white">
-            <h1 className="text-3xl mb-4">Join or Create Project</h1> {/* Updated Title */}
-            {/* Display Error Message */}
-            {error && <p className="text-red-500 mb-4">{error}</p>}
+            <h1 className="text-3xl mb-4">Join or Create Project</h1>
+            {error && <p className="text-red-500 mb-4 text-center px-4">{error}</p>}
             <input
-                className="p-2 m-2 border rounded bg-gray-800 border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500" // Improved styling
-                placeholder="Project ID"
-                value={projectId}
-                onChange={(e) => setProjectId(e.target.value)}
-                disabled={isLoading} // Disable input while loading
+                className="p-2 m-2 border rounded w-80 bg-gray-800 border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500" // Improved styling
+                placeholder="Project Name or ID to Join" // Clarified placeholder
+                value={projectIdInput} // Use dedicated state for input
+                onChange={(e) => setProjectIdInput(e.target.value)}
+                disabled={isLoading}
             />
             <input
                 type="password"
-                className="p-2 m-2 border rounded bg-gray-800 border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500" // Improved styling
-                placeholder="Password"
+                className="p-2 m-2 border rounded w-80 bg-gray-800 border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500" // Improved styling
+                placeholder="Project Password (if required)" // Clarified placeholder
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                disabled={isLoading} // Disable input while loading
+                disabled={isLoading}
             />
             <button
-                className={`px-4 py-2 rounded transition-colors ${isLoading ? 'bg-gray-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500'}`}
+                className={`px-4 py-2 mt-2 rounded transition-colors w-80 ${isLoading ? 'bg-gray-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500'}`}
                 onClick={joinProject}
-                disabled={isLoading} // Disable button while loading
+                disabled={isLoading || !projectIdInput} // Also disable if input is empty
             >
-                {isLoading ? 'Processing...' : 'Join / Create'} {/* Updated Button Text */}
+                {isLoading ? 'Processing...' : 'Join / Create'}
             </button>
+            {/* Optional: Add a button to navigate back or to a dashboard */}
+            {/* <button onClick={() => navigate('/dashboard')} className="mt-4 text-sm text-gray-400 hover:text-gray-200">Back to Dashboard</button> */}
         </div>
     );
 }
