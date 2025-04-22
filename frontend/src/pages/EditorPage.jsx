@@ -1,134 +1,173 @@
-import { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useParams } from "react-router-dom";
-import io from "socket.io-client";
-import MonacoEditor from "@monaco-editor/react";
+import MonacoEditor, { Monaco } from "@monaco-editor/react"; // Import Monaco type
 import axios from "axios";
 
-// Initialize socket connection
-const socket = io("https://unicode-37d2.onrender.com");
+// --- Yjs Imports ---
+import * as Y from 'yjs';
+import { WebsocketProvider } from 'y-websocket';
+import { MonacoBinding } from 'y-monaco';
+// --- End Yjs Imports ---
 
 export default function EditorPage() {
     const { projectId } = useParams();
-    const [code, setCode] = useState("");
+    // State for non-collaborative parts
     const [language, setLanguage] = useState("javascript");
     const [output, setOutput] = useState("");
     const [isRunning, setIsRunning] = useState(false);
     const [outputType, setOutputType] = useState("success"); // success, error, warning
+
+    // Refs for editor instance and Yjs artifacts
+    const editorRef = useRef(null); // Stores the Monaco editor instance
+    const providerRef = useRef(null); // Stores the WebsocketProvider
+    const ydocRef = useRef(null); // Stores the Yjs document
+    const bindingRef = useRef(null); // Stores the MonacoBinding
+
+    // Ref for UI element
     const outputResizeRef = useRef(null);
-    // Ref to store the debounce timeout ID
-    const debounceTimeoutRef = useRef(null);
 
+    // Callback for when the Monaco Editor instance is mounted
+    const handleEditorDidMount = useCallback((editor, monaco) => {
+        console.log("[Yjs Client] Editor mounted.");
+        editorRef.current = editor; // Store editor instance
+
+        // --- Initialize Yjs ---
+        const doc = new Y.Doc(); // Create Yjs doc
+        ydocRef.current = doc; // Store ref to doc
+
+        const provider = new WebsocketProvider(
+            // Ensure the URL is correct for your deployed backend
+            // Use wss:// for secure connections (recommended for deployment)
+            'wss://unicode-37d2.onrender.com', // Your backend WebSocket endpoint URL
+            projectId,                         // Room name (using projectId)
+            doc                                // Yjs document
+        );
+        providerRef.current = provider; // Store ref to provider
+
+        const yText = doc.getText('monaco'); // Get a shared text type named 'monaco'
+
+        // --- Bind Monaco Editor to Yjs ---
+        // Ensure the binding uses the current model and editor context
+        const model = editor.getModel();
+        if (model) {
+            const binding = new MonacoBinding(
+                yText,                     // The Yjs text type
+                model,                     // Monaco editor model
+                new Set([editor]),         // Set of editor instances to bind
+                provider.awareness         // Yjs awareness for cursor/selection sync
+            );
+            bindingRef.current = binding; // Store ref to binding
+             console.log("[Yjs Client] Yjs Document, Provider, and MonacoBinding initialized.");
+        } else {
+            console.error("[Yjs Client] Monaco Editor model not available for binding.");
+        }
+
+        // Log connection status changes
+        provider.on('status', event => {
+            console.log(`[Yjs Provider] Status: ${event.status}`);
+        });
+
+        // Optional: Handle initial content loading if needed
+        // If the document is new/empty, you might fetch initial content
+        // provider.on('sync', isSynced => {
+        //    if (isSynced && yText.length === 0) {
+        //        console.log("Document synced and empty, fetching initial content...");
+        //        axios.get(`https://unicode-37d2.onrender.com/api/projects/${projectId}`)
+        //           .then(res => {
+        //               if (res.data.code) {
+        //                  // Apply initial content transactionally
+        //                  doc.transact(() => {
+        //                       yText.insert(0, res.data.code);
+        //                   });
+        //                   console.log("Applied fetched initial content to Yjs doc.");
+        //               }
+        //           })
+        //           .catch(err => console.error("Error fetching initial content for Yjs:", err));
+        //     }
+        // });
+
+
+    }, [projectId]); // Re-run setup if projectId changes
+
+    // Effect for cleanup and non-Yjs setup (like resize)
     useEffect(() => {
-        // Join project room on mount
-        socket.emit("joinProject", { projectId });
-
-        // Fetch initial code
-        axios.get(`https://unicode-37d2.onrender.com/api/projects/${projectId}`)
-            .then((res) => {
-                // Only set initial code if it hasn't been set already (prevents overriding local changes)
-                if (code === "") {
-                    setCode(res.data.code || "// Start coding here");
-                }
-            })
-            .catch(() => {
-                if (code === "") {
-                    setCode("// Start coding here");
-                }
-            });
-
-        // Listen for incoming code changes from others
-        const handleIncomingCodeChange = ({ code: incomingCode }) => {
-            // Optional: You might want to add logic here to prevent overwriting
-            // the user's code if they are actively typing, or use more
-            // sophisticated merging if using Operational Transformation (OT) or CRDTs.
-            // For now, it directly sets the code.
-            setCode(incomingCode);
-        };
-        socket.on("codeChange", handleIncomingCodeChange);
-
         // --- Resizable Output Panel Logic ---
         const resizeableOutput = outputResizeRef.current;
-        let startY, startHeight;
+        let startY, startHeight, currentListener = null;
 
         function startResize(e) {
-            startY = e.clientY;
-            startHeight = parseInt(document.defaultView.getComputedStyle(resizeableOutput).height, 10);
-            document.documentElement.addEventListener('mousemove', resize);
-            document.documentElement.addEventListener('mouseup', stopResize);
-            e.preventDefault();
-        }
+             startY = e.clientY;
+             startHeight = parseInt(document.defaultView.getComputedStyle(resizeableOutput).height, 10);
+             document.documentElement.addEventListener('mousemove', resize);
+             document.documentElement.addEventListener('mouseup', stopResize);
+             e.preventDefault();
+         }
 
         function resize(e) {
-            const newHeight = startHeight - (e.clientY - startY);
-            if (newHeight > 50 && newHeight < window.innerHeight / 2) {
-                resizeableOutput.style.height = `${newHeight}px`;
-            }
-        }
+             const newHeight = startHeight - (e.clientY - startY);
+             // Ensure reasonable min/max heights
+             const minHeight = 50;
+             const maxHeight = window.innerHeight * 0.6; // Max 60% of viewport height
+             if (newHeight > minHeight && newHeight < maxHeight && resizeableOutput) {
+                 resizeableOutput.style.height = `${newHeight}px`;
+             }
+         }
 
         function stopResize() {
-            document.documentElement.removeEventListener('mousemove', resize);
-            document.documentElement.removeEventListener('mouseup', stopResize);
-        }
+             document.documentElement.removeEventListener('mousemove', resize);
+             document.documentElement.removeEventListener('mouseup', stopResize);
+         }
 
         const resizeHandle = document.getElementById('resize-handle');
         if (resizeHandle) {
-            resizeHandle.addEventListener('mousedown', startResize);
-        }
+             // Prevent adding multiple listeners if effect re-runs
+             currentListener = resizeHandle.__resizeListener;
+             if (currentListener) {
+                 resizeHandle.removeEventListener('mousedown', currentListener);
+             }
+             resizeHandle.addEventListener('mousedown', startResize);
+             resizeHandle.__resizeListener = startResize; // Store listener reference
+         }
         // --- End Resizable Output Panel Logic ---
 
-        // Cleanup on component unmount
+        // Cleanup function
         return () => {
-            socket.off("codeChange", handleIncomingCodeChange); // Remove specific listener
-            socket.disconnect();
-            if (resizeHandle) {
-                resizeHandle.removeEventListener('mousedown', startResize);
+            console.log("[Yjs Client] Cleanup: Destroying Yjs binding, provider, and doc.");
+            // Destroy Yjs artifacts in reverse order of creation
+            bindingRef.current?.destroy();
+            providerRef.current?.disconnect(); // Disconnect provider
+            providerRef.current?.destroy(); // Destroy provider
+            ydocRef.current?.destroy(); // Destroy Yjs doc
+            editorRef.current = null; // Clear editor ref
+
+            // Cleanup resize listeners
+            if (resizeHandle && resizeHandle.__resizeListener) {
+                resizeHandle.removeEventListener('mousedown', resizeHandle.__resizeListener);
+                delete resizeHandle.__resizeListener;
             }
-            // Clean up potential lingering listeners from resize logic
             document.documentElement.removeEventListener('mousemove', resize);
             document.documentElement.removeEventListener('mouseup', stopResize);
-            // Clear the debounce timeout if the component unmounts
-            if (debounceTimeoutRef.current) {
-                clearTimeout(debounceTimeoutRef.current);
-            }
         };
-        // Only re-run effect if projectId changes
-    }, [projectId]); // Removed 'code' from dependency array to prevent issues with socket listeners
+    }, []); // Empty dependency array means this effect runs once on mount for cleanup and resize setup
 
-    // --- Debounced Code Change Handler ---
-    const handleCodeChange = (newCode) => {
-        // Update local state immediately for smooth UI
-        setCode(newCode);
-
-        // Clear any existing debounce timeout
-        if (debounceTimeoutRef.current) {
-            clearTimeout(debounceTimeoutRef.current);
-        }
-
-        // Set a new timeout to send updates after 500ms of inactivity
-        debounceTimeoutRef.current = setTimeout(() => {
-            // Emit code change via WebSocket
-            socket.emit("codeChange", { projectId, code: newCode });
-
-            // **RECOMMENDATION**: Consider removing this HTTP POST from here.
-            // Saving on every debounced change might still be too frequent.
-            // Explore saving periodically, on blur, via a save button,
-            // or letting the backend handle saves based on WebSocket messages.
-            axios.post("https://unicode-37d2.onrender.com/api/projects/update", { projectId, code: newCode })
-                .then(() => console.log("Code saved automatically.")) // Optional: feedback
-                .catch((err) => console.error("Error auto-saving code:", err));
-
-        }, 500); // Debounce time: 500 milliseconds
-    };
-    // --- End Debounced Code Change Handler ---
 
     // --- Run Code Logic ---
     const runCode = async () => {
+        if (!ydocRef.current) {
+            console.error("Yjs document not initialized. Cannot run code.");
+            setOutput("Error: Editor not ready.");
+            setOutputType("error");
+            return;
+        }
+        // Get the current code content directly from the Yjs shared text type
+        const currentCode = ydocRef.current.getText('monaco').toString();
+
         setIsRunning(true);
         setOutput("Running code...");
         setOutputType("success"); // Reset output type
 
         try {
-            const { data } = await axios.post("https://unicode-37d2.onrender.com/api/run", { code, language });
+            const { data } = await axios.post("https://unicode-37d2.onrender.com/api/run", { code: currentCode, language });
 
             if (data.stderr || data.compile_output) {
                 setOutputType("error");
@@ -150,7 +189,7 @@ export default function EditorPage() {
     };
     // --- End Run Code Logic ---
 
-    // --- Output Panel Styling ---
+    // --- Output Panel Styling Helpers ---
     const getOutputHeaderColor = () => {
         switch (outputType) {
             case "success": return "bg-gray-700";
@@ -177,7 +216,7 @@ export default function EditorPage() {
             default: return "Console";
         }
     };
-    // --- End Output Panel Styling ---
+    // --- End Output Panel Styling Helpers ---
 
     return (
         <div className="h-screen flex flex-col bg-gray-900 text-gray-100">
@@ -185,12 +224,17 @@ export default function EditorPage() {
             <div className="flex justify-between items-center p-4 bg-gray-800 border-b border-gray-700">
                 <div className="flex items-center">
                     <h1 className="text-xl font-semibold mr-4">Unicode</h1>
-                    <div className="bg-gray-700 px-3 py-1 rounded text-sm">Project: {projectId}</div>
+                    <div className="bg-gray-700 px-3 py-1 rounded text-sm" title={`Project ID: ${projectId}`}>
+                        Project: {projectId ? projectId.substring(0, 8) + '...' : 'Loading...'}
+                    </div>
                 </div>
 
                 <div className="flex items-center space-x-2">
                     <select
                         value={language}
+                        // When language changes, Monaco needs to know
+                        // The binding should handle language changes if configured,
+                        // otherwise, you might need to update the model language manually.
                         onChange={(e) => setLanguage(e.target.value)}
                         className="p-2 bg-gray-700 text-gray-200 rounded border-none outline-none focus:ring-1 focus:ring-blue-500"
                         style={{ WebkitAppearance: "menulist" }}
@@ -204,11 +248,12 @@ export default function EditorPage() {
 
                     <button
                         onClick={runCode}
-                        disabled={isRunning}
+                        disabled={isRunning || !providerRef.current || providerRef.current.wsconnected === false} // Disable if not connected
                         className={`px-4 py-2 rounded-md flex items-center space-x-2 transition-colors
-                          ${isRunning
-                                ? 'bg-blue-700 cursor-not-allowed opacity-70'
+                          ${isRunning || !providerRef.current || providerRef.current.wsconnected === false
+                                ? 'bg-gray-600 cursor-not-allowed opacity-70'
                                 : 'bg-blue-600 hover:bg-blue-500'}`}
+                        title={!providerRef.current || providerRef.current.wsconnected === false ? "Connecting to collaboration server..." : "Run Code"}
                     >
                         {isRunning ? (
                             <>
@@ -220,7 +265,6 @@ export default function EditorPage() {
                             </>
                         ) : (
                             <>
-                                {/* Play Icon (example) */}
                                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                                     <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
                                 </svg>
@@ -235,17 +279,20 @@ export default function EditorPage() {
             <div className="flex-1 overflow-hidden">
                 <MonacoEditor
                     height="100%"
-                    language={language}
+                    language={language} // Pass language state
                     theme="vs-dark"
-                    value={code}
-                    onChange={handleCodeChange} // Use the debounced handler
+                    // value prop is removed - content controlled by Yjs binding
+                    // onChange prop is removed - changes handled by Yjs binding
+                    onMount={handleEditorDidMount} // Setup Yjs binding here
                     options={{
                         minimap: { enabled: true },
                         scrollBeyondLastLine: false,
                         fontSize: 14,
-                        fontFamily: "'Fira Code', monospace", // Ensure Fira Code is loaded or use alternatives
-                        automaticLayout: true, // Helps editor resize correctly
+                        fontFamily: "'Fira Code', monospace",
+                        automaticLayout: true, // Important for layout adjustments
                     }}
+                    // You might need loading states while editor/binding initializes
+                    // loading={<div>Loading Editor...</div>}
                 />
             </div>
 
@@ -263,7 +310,6 @@ export default function EditorPage() {
                         <span className={getOutputTitleColor()}>{getOutputTitle()}</span>
                     </div>
                     <div className="text-xs text-gray-400">
-                        {/* Simplified status messages */}
                         {outputType === "success" && output && "Completed"}
                         {outputType === "error" && "Failed"}
                         {outputType === "warning" && "Completed with warnings"}
